@@ -1,17 +1,22 @@
+import os
 import cv2
 import time
 import pygame
 
 from modelo_midas  import MidasDepthEstimator
-from modelo_yolo   import YoloDetector
+from modelo_yolo   import YoloDetector, nombrar_objetos
 from fusion_logica import (
     AudioWorker,
     GestorCooldown,
+    MonitorSaludCamara,
+    MonitorMovimiento,
     extraer_profundidad_roi,
     calcular_distancia_metros,
     posicion_en_frame,
     construir_alerta,
+    obtener_archivo_audio,   # Enrutador con Binning (reemplaza construir_nombre_audio)
     UMBRAL_AREA_RELEVANTE,
+    DIRECTORIO_AUDIO,
 )
 
 def main():
@@ -24,8 +29,10 @@ def main():
 
     # 2. Iniciar módulo de audio y cooldowns
     print("[3/3] Iniciando AudioWorker (ElevenLabs)...")
-    audio    = AudioWorker()
-    cooldown = GestorCooldown()
+    audio       = AudioWorker()
+    cooldown    = GestorCooldown()
+    monitor     = MonitorSaludCamara()
+    monitor_mov = MonitorMovimiento()
 
     # 3. Fuente de video
     # Cambiar a 0 para webcam local | URL RTSP para stream del iPhone
@@ -58,6 +65,23 @@ def main():
         alto, ancho = frame.shape[:2]
         tercio      = ancho // 3
 
+        # Monitor de salud de la cámara (brillo, borrosidad, FPS)
+        fps   = 1.0 / max(time.time() - t_fps, 1e-6)
+        t_fps = time.time()
+        alerta_salud = monitor.verificar(frame, fps)
+        if alerta_salud:
+            audio.encolar(alerta_salud)
+
+        # Monitor de movimiento (velocidad, giros, frenadas) vía Optical Flow
+        alerta_mov = monitor_mov.analizar(frame)
+        if alerta_mov:
+            audio.encolar(alerta_mov)
+
+        # Conteos por zona para descripción bajo demanda (tecla 'd')
+        conteo_izq: dict = {}
+        conteo_cen: dict = {}
+        conteo_der: dict = {}
+
         # 1: MiDaS → mapa de profundidad + detección de peligro en el suelo
         depth_map, peligro_suelo = midas.estimate_depth_and_danger(frame)
 
@@ -72,6 +96,14 @@ def main():
             x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
             cx        = (x1 + x2) / 2
             area_norm = ((x2 - x1) * (y2 - y1)) / (alto * ancho)
+
+            # Conteo por zona (independiente del umbral de relevancia)
+            if cx < tercio:
+                conteo_izq[nombre] = conteo_izq.get(nombre, 0) + 1
+            elif cx < 2 * tercio:
+                conteo_cen[nombre] = conteo_cen.get(nombre, 0) + 1
+            else:
+                conteo_der[nombre] = conteo_der.get(nombre, 0) + 1
 
             if area_norm < UMBRAL_AREA_RELEVANTE:
                 continue
@@ -94,9 +126,9 @@ def main():
             cv2.putText(frame, label, (x1 + 2, y1 - 6),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, C_TEXTO, 1, cv2.LINE_AA)
 
-            # Alerta de voz solo si venció el cooldown de esa clase
+            # Alerta de voz: enrutador con binning de distancia
             if cooldown.puede_alertar(clase_id):
-                audio.encolar(construir_alerta(nombre, dist, pos))
+                obtener_archivo_audio(audio, nombre, pos, dist)
                 cooldown.registrar(clase_id)
 
         # 4: Alerta de suelo (MiDaS)
@@ -110,7 +142,7 @@ def main():
                         (12, roi_top + 29), cv2.FONT_HERSHEY_SIMPLEX,
                         0.6, C_PELIGRO, 2, cv2.LINE_AA)
             if cooldown.puede_alertar(-1):
-                audio.encolar("¡Cuidado! Escalón al frente.")
+                audio.encolar(os.path.join(DIRECTORIO_AUDIO, "escalon_frente.mp3"))
                 cooldown.registrar(-1)
 
         # 5: Overlay de tercios y FPS
@@ -127,8 +159,28 @@ def main():
         cv2.imshow("Sistema Asistente Visual", frame)
         cv2.imshow("Mapa de Profundidad (MiDaS)", depth_jet)
 
-        if cv2.waitKey(1) & 0xFF == ord("q"):
+        tecla = cv2.waitKey(1) & 0xFF
+        if tecla == ord("q"):
             break
+        elif tecla == ord("d"):
+            # Descripción completa del entorno bajo demanda
+            print("\n[BOTÓN D] Descripción del entorno...")
+            partes = []
+            if not conteo_cen and not conteo_izq and not conteo_der:
+                descripcion = "El camino está libre."
+            else:
+                if conteo_cen:
+                    partes.append("Al frente hay " + " y ".join(
+                        nombrar_objetos(c, o) for o, c in conteo_cen.items()) + ".")
+                if conteo_izq:
+                    partes.append("A tu izquierda hay " + " y ".join(
+                        nombrar_objetos(c, o) for o, c in conteo_izq.items()) + ".")
+                if conteo_der:
+                    partes.append("A tu derecha hay " + " y ".join(
+                        nombrar_objetos(c, o) for o, c in conteo_der.items()) + ".")
+                descripcion = " ".join(partes)
+            # Descripción solo en consola — no hay MP3 dinámico pregrabado
+            print(f"Descripción: '{descripcion}'\n")
 
     print("\nCerrando sistema...")
     audio.detener()

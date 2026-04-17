@@ -7,9 +7,11 @@ from ultralytics import YOLO
 # Clases de COCO relevantes para navegación
 CLASES_OBSTACULOS = {
     0:  "persona",
+    1:  "bicicleta",
     2:  "coche",
     3:  "moto",
     5:  "autobús",
+    7:  "camión",
     56: "silla",
     57: "sofá",
     59: "cama",
@@ -18,6 +20,24 @@ CLASES_OBSTACULOS = {
     63: "laptop",
     67: "teléfono",
 }
+
+# Genera frases con género y plural correcto en español
+def nombrar_objetos(cantidad: int, nombre_singular: str) -> str:
+    generos = {
+        'persona': 'una', 'bicicleta': 'una', 'moto': 'una',
+        'coche': 'un', 'autobús': 'un', 'camión': 'un',
+        'silla': 'una', 'sofá': 'un', 'cama': 'una', 'mesa': 'una',
+        'televisión': 'una', 'laptop': 'una', 'teléfono': 'un',
+    }
+    plurales = {
+        'persona': 'personas', 'bicicleta': 'bicicletas', 'moto': 'motos',
+        'coche': 'coches', 'autobús': 'autobuses', 'camión': 'camiones',
+        'silla': 'sillas', 'sofá': 'sofás', 'cama': 'camas', 'mesa': 'mesas',
+        'televisión': 'televisiones', 'laptop': 'laptops', 'teléfono': 'teléfonos',
+    }
+    if cantidad == 1:
+        return f"{generos.get(nombre_singular, 'un')} {nombre_singular}"
+    return f"{cantidad} {plurales.get(nombre_singular, nombre_singular + 's')}"
 
 class YoloDetector:
 
@@ -88,6 +108,9 @@ def _main_standalone():
 
         izq_obstruida = centro_obstruido = der_obstruida = False
         max_area_norm = 0.0
+        conteo_izq: dict = {}
+        conteo_cen: dict = {}
+        conteo_der: dict = {}
 
         resultado = detector.detectar(frame)
 
@@ -101,6 +124,14 @@ def _main_standalone():
 
             color_cuadro  = COLOR_OBJETO_CERCA if es_cercano else COLOR_OBJETO_LEJOS
             grosor_cuadro = 3 if es_cercano else 1
+
+            # Conteo por zona para descripción bajo demanda (tecla 'd')
+            if centro_x < tercio:
+                conteo_izq[nombre] = conteo_izq.get(nombre, 0) + 1
+            elif centro_x < 2 * tercio:
+                conteo_cen[nombre] = conteo_cen.get(nombre, 0) + 1
+            else:
+                conteo_der[nombre] = conteo_der.get(nombre, 0) + 1
 
             if es_cercano:
                 if area_norm > max_area_norm:
@@ -139,8 +170,26 @@ def _main_standalone():
         cv2.line(frame, (2 * tercio, 0), (2 * tercio, alto), COLOR_TERCIOS, 2)
         cv2.imshow("YoloDetector Standalone", frame)
 
-        if cv2.waitKey(30) & 0xFF == ord("q"):
+        tecla = cv2.waitKey(30) & 0xFF
+        if tecla == ord("q"):
             break
+        elif tecla == ord("d"):
+            print("\n[BOTÓN D] Generando descripción del entorno...")
+            partes = []
+            if not conteo_cen and not conteo_izq and not conteo_der:
+                descripcion = "El camino está libre."
+            else:
+                if conteo_cen:
+                    partes.append("Al frente hay " + " y ".join(
+                        nombrar_objetos(c, o) for o, c in conteo_cen.items()) + ".")
+                if conteo_izq:
+                    partes.append("A tu izquierda hay " + " y ".join(
+                        nombrar_objetos(c, o) for o, c in conteo_izq.items()) + ".")
+                if conteo_der:
+                    partes.append("A tu derecha hay " + " y ".join(
+                        nombrar_objetos(c, o) for o, c in conteo_der.items()) + ".")
+                descripcion = " ".join(partes)
+            print(f"Descripción: '{descripcion}'\n")
 
     cap.release()
     cv2.destroyAllWindows()

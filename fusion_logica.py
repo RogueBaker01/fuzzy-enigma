@@ -1,16 +1,15 @@
 """
-fusion_logica.py
-──────────────────────────────────────────────────────────────────────────
-Módulo de audio y fusión matemática. No tiene punto de entrada propio.
+ Módulo de audio y fusión matemática. No tiene punto de entrada propio.
 Importado por main_vision.py.
 
 Exporta:
-  - AudioWorker       : Worker asíncrono ElevenLabs (queue + threading)
-  - GestorCooldown    : Anti-spam por clase de objeto
-  - extraer_profundidad_roi()  : Correlación espacial YOLO → MiDaS
-  - calcular_distancia_metros(): Heurística de distancia
-  - posicion_en_frame()        : Clasificación lateral (izq/frente/der)
-  - construir_alerta()         : Construye la frase narrada por ElevenLabs
+  - AudioWorker            : Worker asíncrono local MP3 → pygame (queue + threading)
+  - GestorCooldown         : Anti-spam por clase de objeto
+  - extraer_profundidad_roi()    : Correlación espacial YOLO → MiDaS
+  - calcular_distancia_metros()  : Heurística de distancia
+  - posicion_en_frame()          : Clasificación lateral (izq/frente/der)
+  - construir_alerta()           : Frase de debug para overlay de OpenCV
+  - obtener_archivo_audio()      : Enrutador con Binning de distancia → AudioWorker
 
 CÓMO CALIBRAR CONSTANTE_FOCAL (antes del demo):
     1. Coloca un objeto a exactamente 1.0 metro de la cámara.
@@ -22,6 +21,7 @@ CÓMO CALIBRAR CONSTANTE_FOCAL (antes del demo):
 
 import io
 import os
+import cv2
 import time
 import queue
 import threading
@@ -36,29 +36,36 @@ from elevenlabs import VoiceSettings
 load_dotenv()
 ELEVENLABS_API_KEY  = os.getenv("ELEVENLABS_API_KEY", "")
 
-# ID de voz en tu cuenta de ElevenLabs
-# Busca IDs en: https://api.elevenlabs.io/v1/voices
-ELEVENLABS_VOICE_ID = "EXAVITQu4vr4xnSDxMaL"
+# Voz activa: "Cristina Campos - Natural Conversations" (eleven_multilingual_v2)
+# Perfil: Mujer adulta, acento mexicano, tono conversacional y amigable
+# Copia tu ID desde: https://api.elevenlabs.io/v1/voices
+ELEVENLABS_VOICE_ID = "CaJslL1xziwefCeTNzHv"
 
 # Constante de calibración de distancia (ver instrucciones en docstring)
 CONSTANTE_FOCAL = 350.0
 
-# Cooldown entre alertas de la misma clase de objeto (ahorra créditos de API)
+# Cooldown entre alertas de la misma clase de objeto
 COOLDOWN_ALERTA_SEG = 4.0
 
 # Área normalizada mínima para considerar un objeto relevante
 UMBRAL_AREA_RELEVANTE = 0.03
 
+# Directorio donde están los MP3 pregrabados generados por generador_audios.py.
+# Estructura esperada:
+#   audios/silla_izquierda_1_0.mp3
+#   audios/persona_frente_0_5.mp3
+#   audios/escalon_frente.mp3  ...
+DIRECTORIO_AUDIO = "audios"
 
-# ──────────────────────────────────────────────────────────────────────────
-# AudioWorker: cola asíncrona de texto → ElevenLabs → pygame
-# ──────────────────────────────────────────────────────────────────────────
+# Escalones de distancia disponibles (deben coincidir exactamente con los
+# generados por generador_audios.py). Si MiDaS da un valor intermedio,
+# obtener_archivo_audio() lo aproximará al escalón más cercano.
+ESCALONES_DISTANCIA = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
+
+
+# AudioWorker: cola asíncrona de archivo MP3 → pygame
 
 class AudioWorker:
-    """
-    Separa el TTS del CV loop completamente.
-    El main nunca se bloquea esperando audio.
-    """
 
     def __init__(self):
         self._cola: queue.Queue[str | None] = queue.Queue()
@@ -67,81 +74,60 @@ class AudioWorker:
         if not pygame.mixer.get_init():
             pygame.mixer.init(frequency=44100, size=-16, channels=1, buffer=512)
 
-        if not ELEVENLABS_API_KEY:
-            print("[AudioWorker] ADVERTENCIA: ELEVENLABS_API_KEY vacía. Audio desactivado.")
-            self._cliente = None
-        else:
-            self._cliente = ElevenLabs(api_key=ELEVENLABS_API_KEY)
-            print("[AudioWorker] Cliente ElevenLabs inicializado ✓")
+        print("[AudioWorker] Modo: MP3 locales desde '{}'/".format(DIRECTORIO_AUDIO))
 
         self._hilo = threading.Thread(
             target=self._loop_audio, daemon=True, name="AudioWorker"
         )
         self._hilo.start()
 
-    def encolar(self, texto: str):
-        """Encola un mensaje de voz. No bloquea al hilo que llama."""
-        self._cola.put(texto)
+    def encolar(self, archivo: str):
+        self._cola.put(archivo)
 
     def detener(self):
-        """Cierra el worker limpiamente con una poison pill."""
         self._activo = False
         self._cola.put(None)
 
     def _loop_audio(self):
         while self._activo:
-            texto = self._cola.get()
+            archivo = self._cola.get()
 
-            if texto is None:
+            if archivo is None:
                 break
 
-            print(f"[TTS] >> {texto}")
-
-            if self._cliente is None:
-                self._cola.task_done()
-                continue
+            print(f"[AUDIO] >> {archivo}")
 
             try:
-                # eleven_turbo_v2_5: modelo de baja latencia, ideal para demos en vivo
-                audio_stream = self._cliente.text_to_speech.convert(
-                    text=texto,
-                    voice_id=ELEVENLABS_VOICE_ID,
-                    model_id="eleven_turbo_v2_5",
-                    voice_settings=VoiceSettings(
-                        stability=0.4,
-                        similarity_boost=0.85,
-                        style=0.0,
-                        use_speaker_boost=True,
-                    ),
-                    output_format="mp3_44100_64",
-                )
+                if not os.path.exists(archivo):
+                    # Archivo no grabado → bip genérico si existe, si no silencio
+                    bip = os.path.join(DIRECTORIO_AUDIO, "beep.mp3")
+                    if os.path.exists(bip):
+                        archivo = bip
+                    else:
+                        self._cola.task_done()
+                        continue
 
-                # Reproducir desde RAM, sin escribir a disco
-                audio_bytes  = b"".join(audio_stream)
-                buffer_audio = io.BytesIO(audio_bytes)
-                pygame.mixer.music.load(buffer_audio, "mp3")
+                pygame.mixer.music.load(archivo)
                 pygame.mixer.music.play()
 
                 while pygame.mixer.music.get_busy():
                     time.sleep(0.05)
 
             except Exception as e:
-                print(f"[AudioWorker] Error ElevenLabs: {e}")
+                print(f"[AudioWorker] Error al reproducir '{archivo}': {e}")
 
             self._cola.task_done()
 
+            # -- ElevenLabs (reservado para cuando se reactive la nube) --
+            # from elevenlabs.client import ElevenLabs
+            # cliente = ElevenLabs(api_key=os.getenv('ELEVENLABS_API_KEY', ''))
+            # audio_stream = cliente.text_to_speech.convert(text=texto, ...)
+            # pygame.mixer.music.load(io.BytesIO(b''.join(audio_stream)), 'mp3')
 
-# ──────────────────────────────────────────────────────────────────────────
+
 # GestorCooldown: anti-spam por clase de objeto
-# ──────────────────────────────────────────────────────────────────────────
 
 class GestorCooldown:
-    """
-    Cronómetro independiente por clase. Evita:
-      - Gasto excesivo de créditos de ElevenLabs.
-      - Solapamiento de audio que desorienta al usuario.
-    Clase -1 reservada para alertas de suelo (MiDaS).
-    """
 
     def __init__(self, cooldown_seg: float = COOLDOWN_ALERTA_SEG):
         self._cd = cooldown_seg
@@ -161,10 +147,6 @@ def extraer_profundidad_roi(
     x1: int, y1: int,
     x2: int, y2: int,
 ) -> float:
-    """
-    Extrae la mediana de profundidad del bbox de YOLO sobre el depth map de MiDaS.
-    Mediana en lugar de media: ignora bordes ruidosos y reflexiones.
-    """
     h, w = depth_map.shape[:2]
     x1 = max(0, min(x1, w - 1));  x2 = max(x1 + 1, min(x2, w))
     y1 = max(0, min(y1, h - 1));  y2 = max(y1 + 1, min(y2, h))
@@ -173,11 +155,6 @@ def extraer_profundidad_roi(
 
 
 def calcular_distancia_metros(profundidad_media: float) -> float:
-    """
-    MiDaS produce disparidad inversa (mayor valor = más cercano).
-    Fórmula pinhole: distancia = CONSTANTE_FOCAL / disparidad.
-    Calibrar CONSTANTE_FOCAL con cinta métrica antes del demo.
-    """
     return round(CONSTANTE_FOCAL / (profundidad_media + 1e-6), 1)
 
 
@@ -189,7 +166,259 @@ def posicion_en_frame(centro_x: float, ancho: int) -> str:
 
 
 def construir_alerta(nombre: str, distancia: float, posicion: str) -> str:
+    # Solo para la pantalla de OpenCV (debug). NO se envía al audio.
     if distancia < 1.0:    prefijo = "¡Cuidado! "
     elif distancia < 2.0:  prefijo = "Atención. "
     else:                  prefijo = ""
     return f"{prefijo}{nombre} {posicion}, a {distancia} metros"
+
+
+def construir_nombre_audio(nombre_clase: str, posicion_str: str) -> str:
+    """
+    [LEGACY] Genera la ruta al MP3 sin dimensión de distancia.
+    Mantenida por compatibilidad. Preferir obtener_archivo_audio() para el
+    catálogo completo con distancia.
+    Formato: audios/{clase}_{posicion_simple}.mp3
+    """
+    mapa_pos = {
+        "a tu izquierda": "izquierda",
+        "al frente":      "frente",
+        "a tu derecha":   "derecha",
+    }
+    pos_simple = mapa_pos.get(posicion_str, "frente")
+    return os.path.join(DIRECTORIO_AUDIO, f"{nombre_clase}_{pos_simple}.mp3")
+
+
+def _redondear_escalon(distancia_metros: float) -> float:
+    """
+    Redondeo Escalón (Binning): aproxima la distancia continua de MiDaS
+    al escalón pregrabado más cercano dentro de ESCALONES_DISTANCIA.
+
+    Reglas de tope:
+        - Si distancia < mínimo disponible → usa el primer escalón
+        - Si distancia > máximo disponible → usa el último escalón (tope)
+
+    Ejemplo (escalones = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]):
+        0.3  m → 0.5
+        1.2  m → 1.0   (más cercano a 1.0 que a 1.5)
+        1.8  m → 2.0
+        4.5  m → 3.0   (tope)
+    """
+    if not ESCALONES_DISTANCIA:
+        return distancia_metros
+
+    # Tope superior: nunca superar el máximo pregrabado
+    if distancia_metros >= ESCALONES_DISTANCIA[-1]:
+        return ESCALONES_DISTANCIA[-1]
+
+    # Tope inferior
+    if distancia_metros <= ESCALONES_DISTANCIA[0]:
+        return ESCALONES_DISTANCIA[0]
+
+    # Buscar el escalón más cercano por mínima distancia absoluta
+    return min(ESCALONES_DISTANCIA, key=lambda e: abs(e - distancia_metros))
+
+
+def obtener_archivo_audio(
+    audio_worker,           # Instancia de AudioWorker a la que encolar el MP3
+    clase_nombre: str,
+    posicion: str,          # Valor devuelto por posicion_en_frame() (texto largo)
+    distancia_metros: float,
+) -> None:
+    """
+    Enrutador lógico de audio con Binning de distancia.
+
+    Flujo:
+        1. Traduce la posición larga a clave corta (ej. "a tu izquierda" → "izquierda").
+        2. Redondea la distancia continua de MiDaS al escalón más cercano pregrabado.
+        3. Construye el nombre de archivo esperado (ej. "silla_izquierda_1_0.mp3").
+        4. Si el archivo existe → lo encola en AudioWorker para reproducción inmediata.
+        5. Si NO existe → intenta el beep.mp3 de fallback; si tampoco existe, silencio.
+
+    Parámetros:
+        audio_worker      : AudioWorker instanciado en main_vision.py
+        clase_nombre      : Nombre de clase de YOLO en español (ej. "silla", "persona")
+        posicion          : Salida de posicion_en_frame() (ej. "a tu izquierda")
+        distancia_metros  : Distancia estimada por calcular_distancia_metros()
+
+    Retorna:
+        None (encola directamente en audio_worker)
+    """
+
+    # --- 1. Traducir posición larga a clave de nombre de archivo ---
+    mapa_pos = {
+        "a tu izquierda": "izquierda",
+        "al frente":      "frente",
+        "a tu derecha":   "derecha",
+    }
+    pos_clave = mapa_pos.get(posicion, "frente")
+
+    # --- 2. Redondeo Escalón: aproximar distancia al step pregrabado más cercano ---
+    dist_binned = _redondear_escalon(distancia_metros)
+
+    # --- 3. Construir nombre del archivo (ej. "silla_izquierda_1_0.mp3") ---
+    # La distancia se formatea como float con 1 decimal y el punto reemplazado por _
+    dist_sufijo    = f"{dist_binned:.1f}".replace(".", "_")
+    nombre_archivo = f"{clase_nombre}_{pos_clave}_{dist_sufijo}.mp3"
+    ruta_audio     = os.path.join(DIRECTORIO_AUDIO, nombre_archivo)
+
+    # --- 4. Verificar existencia y encolar ---
+    if os.path.exists(ruta_audio):
+        # Caso normal: archivo pregrabado encontrado → reproducir
+        audio_worker.encolar(ruta_audio)
+
+    else:
+        # --- 5. Fallback: beep genérico si el MP3 específico no existe ---
+        # Esto cubre casos límite como clases nuevas no incluidas en CLASES del generador
+        print(
+            f"[AUDIO][WARN] Archivo no encontrado: '{ruta_audio}'. "
+            f"Ejecuta generador_audios.py para generarlo."
+        )
+        ruta_beep = os.path.join(DIRECTORIO_AUDIO, "beep.mp3")
+        if os.path.exists(ruta_beep):
+            audio_worker.encolar(ruta_beep)
+        # Si tampoco existe el beep → silencio total (pass implícito)
+
+
+# MonitorSaludCamara: detecta condiciones degradadas del entorno visual
+
+class MonitorSaludCamara:
+    UMBRAL_OSCURIDAD  = 35.0   # Brillo promedio de píxel (0–255)
+    UMBRAL_BORROSIDAD = 40.0   # Varianza del Laplaciano
+    FPS_MINIMOS       = 5.0    # FPS por debajo de esto = alerta de lentitud
+    COOLDOWN_SALUD    = 15.0   # Segundos entre alertas de salud repetidas
+
+    def __init__(self):
+        import cv2 as _cv2
+        self._cv2 = _cv2
+        self._ultimo_chequeo = 0.0
+
+    def verificar(self, frame, fps_actuales: float) -> str | None:
+
+        ahora = time.time()
+        if (ahora - self._ultimo_chequeo) < self.COOLDOWN_SALUD:
+            return None
+
+        gris = self._cv2.cvtColor(frame, self._cv2.COLOR_BGR2GRAY)
+        brillo = self._cv2.mean(gris)[0]
+        borrosidad = self._cv2.Laplacian(gris, 6).var()  # 6 = CV_64F
+
+        alerta = None
+        if brillo < self.UMBRAL_OSCURIDAD:
+            print(f"[SALUD] Poca luz. Brillo={brillo:.1f}")
+            alerta = os.path.join(DIRECTORIO_AUDIO, "oscuro.mp3")
+        elif borrosidad < self.UMBRAL_BORROSIDAD:
+            print(f"[SALUD] Cámara borrosa. Varianza={borrosidad:.1f}")
+            alerta = os.path.join(DIRECTORIO_AUDIO, "camara_sucia.mp3")
+        elif fps_actuales < self.FPS_MINIMOS:
+            print(f"[SALUD] FPS bajos. FPS={fps_actuales:.1f}")
+            alerta = os.path.join(DIRECTORIO_AUDIO, "procesando_lento.mp3")
+
+        if alerta:
+            self._ultimo_chequeo = ahora
+        return alerta
+
+
+# MonitorMovimiento: detecta velocidad, giros y frenadas usando Optical Flow
+
+class MonitorMovimiento:
+
+    # Umbrales ajustables (en píxeles por frame a 30 FPS)
+    UMBRAL_VELOCIDAD_ALTA  = 18.0   # Desplazamiento medio alto → va muy rápido
+    UMBRAL_GIRO_BRUSCO     = 12.0   # Componente horizontal neta → giro lateral
+    UMBRAL_FRENADA         = 10.0   # Caída de velocidad entre frames consecutivos
+    COOLDOWN_MOVIMIENTO    = 3.0    # Segundos entre alertas de movimiento
+
+    # Parámetros de Lucas-Kanade
+    LK_PARAMS = dict(
+        winSize=(15, 15),
+        maxLevel=2,
+        criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03),
+    )
+    FEATURE_PARAMS = dict(maxCorners=80, qualityLevel=0.3, minDistance=10, blockSize=7)
+
+    def __init__(self):
+        self._frame_anterior_gris = None
+        self._puntos_anteriores   = None
+        self._velocidad_anterior  = 0.0
+        self._ultimo_chequeo      = 0.0
+        self._refresco_puntos     = 0     # Contador para redetectar puntos cada N frames
+
+    def analizar(self, frame) -> str | None:
+
+        gris = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        # Primer frame: solo guardar referencia
+        if self._frame_anterior_gris is None:
+            self._frame_anterior_gris = gris
+            self._puntos_anteriores = cv2.goodFeaturesToTrack(gris, **self.FEATURE_PARAMS)
+            return None
+
+        # Re-detectar puntos cada 20 frames o si quedan muy pocos
+        self._refresco_puntos += 1
+        if self._puntos_anteriores is None or len(self._puntos_anteriores) < 10 \
+                or self._refresco_puntos >= 20:
+            self._puntos_anteriores = cv2.goodFeaturesToTrack(gris, **self.FEATURE_PARAMS)
+            self._refresco_puntos = 0
+            self._frame_anterior_gris = gris
+            return None
+
+        # Calcular flujo óptico sparse (Lucas-Kanade)
+        puntos_nuevos, status, _ = cv2.calcOpticalFlowPyrLK(
+            self._frame_anterior_gris, gris,
+            self._puntos_anteriores, None,
+            **self.LK_PARAMS,
+        )
+
+        # Filtrar solo puntos con tracking exitoso
+        buenos_ant = self._puntos_anteriores[status == 1]
+        buenos_nue = puntos_nuevos[status == 1]
+
+        self._frame_anterior_gris = gris
+        self._puntos_anteriores   = buenos_nue.reshape(-1, 1, 2) if len(buenos_nue) > 0 else None
+
+        if len(buenos_ant) < 5:
+            return None
+
+        # Vectores de desplazamiento (dx, dy) por punto
+        delta     = buenos_nue - buenos_ant
+        magnitud  = np.linalg.norm(delta, axis=1)          # Velocidad por punto
+        vel_media = float(np.mean(magnitud))                # Velocidad global (píxeles/frame)
+        dx_medio  = float(np.mean(delta[:, 0]))             # Componente horizontal neta
+        dy_medio  = float(np.mean(delta[:, 1]))             # Componente vertical neta
+
+        # Verificar cooldown antes de alertar
+        ahora = time.time()
+        if (ahora - self._ultimo_chequeo) < self.COOLDOWN_MOVIMIENTO:
+            self._velocidad_anterior = vel_media
+            return None
+
+        alerta = None
+
+        # 1. Velocidad excesiva
+        if vel_media > self.UMBRAL_VELOCIDAD_ALTA:
+            print(f"[MOVIMIENTO] Velocidad alta. Flujo={vel_media:.1f}px/frame")
+            alerta = os.path.join(DIRECTORIO_AUDIO, "rapido.mp3")
+
+        # 2. Giro brusco (componente horizontal neta dominante)
+        elif abs(dx_medio) > self.UMBRAL_GIRO_BRUSCO:
+            lado = "derecha" if dx_medio > 0 else "izquierda"
+            print(f"[MOVIMIENTO] Giro brusco {lado}. dx={dx_medio:.1f}")
+            alerta = os.path.join(DIRECTORIO_AUDIO, f"giro_{lado}.mp3")
+
+        # 3. Frenada súbita
+        elif (self._velocidad_anterior - vel_media) > self.UMBRAL_FRENADA \
+                and self._velocidad_anterior > 5.0:
+            print(f"[MOVIMIENTO] Frenada. {self._velocidad_anterior:.1f}→{vel_media:.1f}px/frame")
+            alerta = os.path.join(DIRECTORIO_AUDIO, "frenada.mp3")
+
+        # 4. Marcha atrás
+        elif dy_medio > self.UMBRAL_VELOCIDAD_ALTA * 0.6 and vel_media > 5.0:
+            print(f"[MOVIMIENTO] Posible retroceso. dy={dy_medio:.1f}")
+            alerta = os.path.join(DIRECTORIO_AUDIO, "retroceso.mp3")
+
+        if alerta:
+            self._ultimo_chequeo = ahora
+
+        self._velocidad_anterior = vel_media
+        return alerta
