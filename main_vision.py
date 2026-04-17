@@ -1,4 +1,6 @@
 import os
+import sys
+import argparse
 import cv2
 import time
 import pygame
@@ -14,12 +16,74 @@ from fusion_logica import (
     calcular_distancia_metros,
     posicion_en_frame,
     construir_alerta,
-    obtener_archivo_audio,   # Enrutador con Binning (reemplaza construir_nombre_audio)
+    obtener_archivo_audio,
     UMBRAL_AREA_RELEVANTE,
     DIRECTORIO_AUDIO,
 )
 
+# ---------------------------------------------------------------------------
+# URL del stream RTSP del teléfono.
+# Aplicaciones compatibles: DroidCam, IP Webcam (Android) | EpocCam (iOS)
+# Formato genérico:  rtsp://<IP_DEL_TELEFONO>:<PUERTO>/video
+# IP Webcam (Android, puerto 8080): "http://192.168.1.X:8080/video"
+# DroidCam  (puerto 4747):          "http://192.168.1.X:4747/video"
+# EpocCam   (iOS, RTSP):            "rtsp://192.168.1.X:2222/live"
+# ---------------------------------------------------------------------------
+FUENTE_TELEFONO_URL = "http://192.168.1.100:8080/video"  # <-- cambia la IP de tu teléfono
+
+
+def resolver_fuente_video(modo: str) -> tuple[str | int, str]:
+    """
+    Resuelve la fuente de víneo según el modo seleccionado.
+    Retorna (src, etiqueta_hud) donde src es el argumento de cv2.VideoCapture.
+
+    Modos:
+        archivo  → videoplayback2.mp4  (archivo local de prueba)
+        webcam   → 0                   (cámara integrada / USB)
+        telefono → FUENTE_TELEFONO_URL con fallback a webcam
+    """
+    if modo == "webcam":
+        print("[FUENTE] Modo: Cámara web local (dispositivo 0)")
+        return 0, "WEBCAM"
+
+    if modo == "telefono":
+        print(f"[FUENTE] Modo: Teléfono  →  {FUENTE_TELEFONO_URL}")
+        print("[FUENTE] Verificando conexión con el teléfono...")
+        cap_test = cv2.VideoCapture(FUENTE_TELEFONO_URL)
+        if cap_test.isOpened():
+            cap_test.release()
+            print("[FUENTE] ✔ Teléfono conectado.")
+            return FUENTE_TELEFONO_URL, "TELEFONO"
+        else:
+            cap_test.release()
+            print("[FUENTE][WARN] No se pudo conectar al teléfono.")
+            print(f"[FUENTE][WARN] Verifica que la IP sea correcta: {FUENTE_TELEFONO_URL}")
+            print("[FUENTE][WARN] Usando webcam local como fallback.")
+            return 0, "WEBCAM (fallback)"
+
+    # Modo por defecto: archivo de video local
+    print(f"[FUENTE] Modo: Archivo de video local")
+    return "videoplayback2.mp4", "ARCHIVO"
+
+
 def main():
+    # --- Selección de fuente de video vía argumento CLI ---
+    parser = argparse.ArgumentParser(
+        description="Sistema Asistente Visual — Edge Computing YOLOv8 + MiDaS"
+    )
+    parser.add_argument(
+        "--fuente",
+        choices=["archivo", "webcam", "telefono"],
+        default="archivo",
+        help=(
+            "Fuente de video: "
+            "'archivo' = videoplayback2.mp4 (default), "
+            "'webcam'  = cámara local (dispositivo 0), "
+            "'telefono' = stream del teléfono via IP/RTSP"
+        ),
+    )
+    args = parser.parse_args()
+
     # 1. Cargar modelos de CV
     print("\n[1/3] Cargando YoloDetector (FP16)...")
     yolo = YoloDetector()
@@ -28,23 +92,28 @@ def main():
     midas = MidasDepthEstimator()
 
     # 2. Iniciar módulo de audio y cooldowns
-    print("[3/3] Iniciando AudioWorker (ElevenLabs)...")
+    print("[3/3] Iniciando AudioWorker (MP3 locales)...")
     audio       = AudioWorker()
     cooldown    = GestorCooldown()
     monitor     = MonitorSaludCamara()
     monitor_mov = MonitorMovimiento()
 
-    # 3. Fuente de video
-    # Cambiar a 0 para webcam local | URL RTSP para stream del iPhone
-    src = "videoplayback2.mp4"
+    # 3. Fuente de video (seleccionada por CLI)
+    src, etiqueta_fuente = resolver_fuente_video(args.fuente)
     cap = cv2.VideoCapture(src)
 
     if not cap.isOpened():
-        print("[ERROR] No se puede abrir la fuente de video.")
+        print(f"[ERROR] No se puede abrir la fuente de video: '{src}'")
+        if args.fuente == "telefono":
+            print("[AYUDA] Asegúrate de que:")
+            print(f"         1. El teléfono y la PC estén en la misma red Wi-Fi")
+            print(f"         2. La app de streaming esté corriendo en el teléfono")
+            print(f"         3. La IP en FUENTE_TELEFONO_URL sea correcta: {FUENTE_TELEFONO_URL}")
         audio.detener()
         return
 
-    print("\n[OK] Sistema listo. Presiona 'q' en la ventana para salir.\n")
+    print(f"\n[OK] Sistema listo. Fuente activa: {etiqueta_fuente}")
+    print("     Controles: [Q] Salir  |  [D] Describir entorno\n")
 
     # Paleta de colores (BGR)
     C_TERCIOS = (0, 230, 60)
@@ -145,7 +214,7 @@ def main():
                 audio.encolar(os.path.join(DIRECTORIO_AUDIO, "escalon_frente.mp3"))
                 cooldown.registrar(-1)
 
-        # 5: Overlay de tercios y FPS
+        # 5: Overlay de tercios, FPS y etiqueta de fuente
         cv2.line(frame, (tercio, 0), (tercio, alto), C_TERCIOS, 2)
         cv2.line(frame, (2 * tercio, 0), (2 * tercio, alto), C_TERCIOS, 2)
 
@@ -153,6 +222,13 @@ def main():
         t_fps = time.time()
         cv2.putText(frame, f"FPS: {fps:.1f}", (ancho - 110, 28),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, C_TERCIOS, 2, cv2.LINE_AA)
+
+        # Etiqueta de fuente activa (esquina inferior izquierda)
+        etiqueta_txt = f"FUENTE: {etiqueta_fuente}"
+        (ew, eh), _ = cv2.getTextSize(etiqueta_txt, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+        cv2.rectangle(frame, (6, alto - 28), (14 + ew, alto - 6), C_BG, -1)
+        cv2.putText(frame, etiqueta_txt, (10, alto - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, C_TERCIOS, 1, cv2.LINE_AA)
 
         # 6: Mostrar ventanas
         depth_jet = cv2.applyColorMap(depth_map, cv2.COLORMAP_JET)

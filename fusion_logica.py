@@ -1,5 +1,5 @@
 """
- Módulo de audio y fusión matemática. No tiene punto de entrada propio.
+Módulo de audio y fusión matemática. No tiene punto de entrada propio.
 Importado por main_vision.py.
 
 Exporta:
