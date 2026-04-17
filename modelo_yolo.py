@@ -7,6 +7,9 @@ from ultralytics import YOLO
 # Clases de COCO relevantes para navegación
 CLASES_OBSTACULOS = {
     0:  "persona",
+    2:  "coche",
+    3:  "moto",
+    5:  "autobús",
     56: "silla",
     57: "sofá",
     59: "cama",

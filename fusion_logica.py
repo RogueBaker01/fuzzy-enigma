@@ -154,9 +154,7 @@ class GestorCooldown:
         self._registro[clase_id] = time.time()
 
 
-# ──────────────────────────────────────────────────────────────────────────
 # Funciones matemáticas de fusión espacial YOLO + MiDaS
-# ──────────────────────────────────────────────────────────────────────────
 
 def extraer_profundidad_roi(
     depth_map: np.ndarray,
