@@ -64,24 +64,6 @@ class EstimadorProfundidadMiDaS:
         self,
         frame_bgr: np.ndarray
     ) -> tuple[np.ndarray, bool]:
-        """
-        Procesa un frame BGR de OpenCV y retorna el mapa de
-        profundidad normalizado más un indicador de peligro.
-
-        Parámetros
-        ----------
-        frame_bgr : np.ndarray
-            Frame capturado por OpenCV (H x W x 3, dtype uint8, BGR).
-
-        Retorna
-        -------
-        mapa_visualizable : np.ndarray
-            Mapa de profundidad escalado a uint8 (0–255), mismo
-            tamaño que la entrada. Listo para aplicar colormaps.
-        peligro_escaleras : bool
-            True si se detecta una discontinuidad brusca en la
-            zona del suelo (escalón o precipicio).
-        """
         alto, ancho = frame_bgr.shape[:2]
 
         # 1. Pre-procesado con transforms de MiDaS
@@ -135,29 +117,6 @@ class EstimadorProfundidadMiDaS:
         mapa_profundidad: np.ndarray,
         alto_frame: int
     ) -> bool:
-        """
-        Analiza el 30% inferior del mapa de profundidad (zona del
-        suelo inmediato) buscando discontinuidades verticales bruscas
-        que indiquen un escalón hacia abajo o un precipicio.
-
-        Estrategia matemática
-        ----------------------
-        Se calcula el **gradiente vertical** (Sobel-Y) de la ROI de
-        profundidad. Una desviación estándar alta del gradiente
-        significa que la profundidad cambia abruptamente de modo
-        vertical — señal característica de un borde de escalón.
-
-        Parámetros
-        ----------
-        mapa_profundidad : np.ndarray
-            Mapa de profundidad crudo (float32, valores relativos).
-        alto_frame : int
-            Altura total del frame original en píxeles.
-
-        Retorna
-        -------
-        bool : True si existe peligro de escalón/caída.
-        """
         # Extraer ROI: 30% inferior
         inicio_roi = int(alto_frame * (1.0 - ROI_FRACCION_INFERIOR))
         roi = mapa_profundidad[inicio_roi:, :]
@@ -191,21 +150,8 @@ class EstimadorProfundidadMiDaS:
 # ENTORNO DE PRUEBA
 
 if __name__ == "__main__":
-    """
-    Bloque de prueba autónomo.
-    Usa la cámara web local (índice 0) para validar el módulo
-    MiDaS de forma independiente, sin requerir el stream del iPhone.
 
-    Ventanas mostradas:
-      - "Frame Original": frame BGR con ROI marcada y alerta.
-      - "Mapa de Profundidad": salida MiDaS en COLORMAP_JET.
-
-    Presiona 'q' para salir.
-    """
-
-    print("=" * 60)
-    print("  MÓDULO MiDaS — Prueba con Cámara Web Local")
-    print("=" * 60)
+    print("Módulo MiDaS — Prueba con Cámara Web Local")
 
     # Inicializar estimador
     estimador = EstimadorProfundidadMiDaS()
@@ -237,28 +183,28 @@ if __name__ == "__main__":
     while True:
         ret, frame = cap.read()
         if not ret:
-            print("[PRUEBA] ⚠️  No se pudo leer el frame. Reintentando...")
+            print("[PRUEBA] No se pudo leer el frame. Reintentando...")
             continue
 
         alto, ancho = frame.shape[:2]
 
-        # ── Inferencia MiDaS ──────────────────────────────
+        # Inferencia MiDaS
         mapa_uint8, peligro = estimador.procesar_frame(frame)
 
-        # ── Calcular FPS con media móvil exponencial ──────
+        # Calcular FPS con media móvil exponencial
         tiempo_actual = time.perf_counter()
         fps_instantaneo = 1.0 / max(tiempo_actual - tiempo_anterior, 1e-9)
         fps_suavizado = (1 - alpha_ema) * fps_suavizado + alpha_ema * fps_instantaneo
         tiempo_anterior = tiempo_actual
 
-        # ── Aplicar colormap al mapa de profundidad ───────
+        # Aplicar colormap al mapa de profundidad
         mapa_color = cv2.applyColorMap(mapa_uint8, cv2.COLORMAP_JET)
 
-        # ── Coordenadas del ROI (30% inferior) ────────────
+        # Coordenadas del ROI (30% inferior)
         inicio_roi_y = int(alto * (1.0 - ROI_FRACCION_INFERIOR))
         color_roi = COLOR_ROI_PELIGRO if peligro else COLOR_ROI_NORMAL
 
-        # ── Dibujar rectángulo ROI en frame original ───────
+        # Dibujar rectángulo ROI en frame original
         frame_display = frame.copy()
         grosor_rect = 2 if not peligro else 3
         cv2.rectangle(
@@ -281,7 +227,7 @@ if __name__ == "__main__":
             lineType=cv2.LINE_AA
         )
 
-        # ── Alerta visual si hay peligro ──────────────────
+        # Alerta visual si hay peligro
         if peligro:
             # Banner rojo semitransparente en la parte superior
             overlay = frame_display.copy()
@@ -310,9 +256,9 @@ if __name__ == "__main__":
                 lineType=cv2.LINE_AA
             )
             # Imprimir en consola
-            print("[⚠️  ALERTA] !!! ESCALERAS / PRECIPICIO DETECTADO !!!")
+            print("[ALERTA] !!! ESCALERAS / PRECIPICIO DETECTADO !!!")
 
-        # ── Mostrar FPS en ambas ventanas ─────────────────
+        # Mostrar FPS en ambas ventanas
         texto_fps = f"FPS: {fps_suavizado:.1f}"
         cv2.putText(
             frame_display, texto_fps,
@@ -333,20 +279,20 @@ if __name__ == "__main__":
             lineType=cv2.LINE_AA
         )
 
-        # ── Dibujar línea de inicio de ROI en el mapa ─────
+        # Dibujar línea de inicio de ROI en el mapa
         cv2.line(mapa_color, (0, inicio_roi_y), (ancho, inicio_roi_y),
                  color_roi, 2)
 
-        # ── Mostrar ventanas ──────────────────────────────
+        # Mostrar ventanas
         cv2.imshow("Frame Original — MiDaS Demo", frame_display)
         cv2.imshow("Mapa de Profundidad (COLORMAP_JET)", mapa_color)
 
-        # ── Salir con 'q' ─────────────────────────────────
+        # Salir con 'q'
         if cv2.waitKey(1) & 0xFF == ord("q"):
             print("\n[PRUEBA] Saliendo por solicitud del usuario.")
             break
 
-    # ── Liberación de recursos ────────────────────────────
+    # Liberación de recursos
     cap.release()
     cv2.destroyAllWindows()
     print("[PRUEBA] Recursos liberados. Fin del programa.")
