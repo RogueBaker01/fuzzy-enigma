@@ -1,298 +1,172 @@
 import cv2
-import numpy as np
 import torch
+import numpy as np
 import time
 
-# Fracción inferior del frame que representa el suelo inmediato
-ROI_FRACCION_INFERIOR: float = 0.30
-
-# Umbral de desviación estándar del gradiente vertical en la ROI.
-# Un valor alto indica una discontinuidad brusca de profundidad
-# (escalón hacia abajo o precipicio).
-UMBRAL_STD_GRADIENTE: float = 12.0
-
-# Nombre del modelo en torch.hub
-MIDAS_MODELO: str = "MiDaS_small"
-MIDAS_REPO: str = "intel-isl/MiDaS"
-
-
-class EstimadorProfundidadMiDaS:
-
+class MidasDepthEstimator:
     def __init__(self):
-        # Selección de dispositivo
-        if torch.cuda.is_available():
-            self.device = torch.device("cuda")
-            print(f"[MiDaS] GPU detectada: {torch.cuda.get_device_name(0)}")
-            print(f"[MiDaS] VRAM disponible: "
-                  f"{torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"Iniciando MiDaS en el dispositivo: {self.device}")
+        
+        # Cargar el modelo MiDaS_small (el más ligero y rápido de la familia MiDaS)
+        model_type = "MiDaS_small"
+        
+        # Cargar el modelo desde torch.hub
+        self.midas = torch.hub.load("intel-isl/MiDaS", model_type)
+        
+        # Mover a GPU de inmediato y convertir a precisión media (FP16)
+        # Esto reduce el consumo de memoria a la mitad y acelera la inferencia
+        self.midas.to(self.device)
+        if self.device.type == 'cuda':
+            self.midas.half()
+            
+        self.midas.eval()
+        
+        # Cargar las transformaciones específicas para MiDaS_small
+        midas_transforms = torch.hub.load("intel-isl/MiDaS", "transforms")
+        self.transform = midas_transforms.small_transform
+
+    @torch.no_grad() # Desactivar el cálculo de gradientes es CRÍTICO para inferencia rápida
+    def estimate_depth_and_danger(self, frame):
+
+        # 1. Preparar la imagen
+        # OpenCV captura en formato BGR por defecto, MiDaS necesita RGB
+        img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        
+        # Aplicar las transformaciones nativas y mover el tensor a la GPU
+        input_batch = self.transform(img_rgb).to(self.device)
+        
+        # Convertir el tensor de entrada a FP16 para igualar los pesos del modelo
+        if self.device.type == 'cuda':
+            input_batch = input_batch.half()
+            
+        # 2. Inferencia con el modelo MiDaS
+        prediction = self.midas(input_batch)
+        
+        # Interpolar la predicción al tamaño original de la imagen
+        # MiDaS devuelve una resolución menor; la escalamos con interpolación bicúbica
+        prediction = torch.nn.functional.interpolate(
+            prediction.unsqueeze(1),
+            size=img_rgb.shape[:2],
+            mode="bicubic",
+            align_corners=False,
+        ).squeeze()
+        
+        # Mover el tensor de resultado vuelta a la CPU y convertirlo a un array de NumPy
+        depth_map = prediction.cpu().numpy()
+        
+        # 3. Escalar y normalizar a 8-bit (0-255)
+        # Para que sea fácil de visualizar con mapas de calor de OpenCV
+        depth_min = depth_map.min()
+        depth_max = depth_map.max()
+        
+        # Prevención contra división por cero
+        if depth_max - depth_min > 0:
+            depth_map_normalized = (depth_map - depth_min) / (depth_max - depth_min)
         else:
-            self.device = torch.device("cpu")
-            print("[MiDaS] CUDA no disponible. Usando CPU (rendimiento reducido).")
+            depth_map_normalized = np.zeros_like(depth_map)
+            
+        # Escalar a valores uint8
+        depth_map_8bit = (depth_map_normalized * 255.0).astype(np.uint8)
+        
+        # 4. Lógica de Detección de Peligro (Escaleras/Precipicio hacia abajo)
+        # Extraer ROI (Región de Interés): El 30% más inferior del frame visualizado
+        h, w = depth_map_8bit.shape
+        roi_top = int(h * 0.7)
+        roi = depth_map_8bit[roi_top:h, :]
+        
+        # Lógica Matemática
+        # Valores ALTOS (cercanos a 255) = CERCANO al lente.
+        # Valores BAJOS (cercanos a 0) = LEJANO al lente o sin obstáculo.
+        
+        # Estrategia Edge Computing (ultra-rápida y a bajo coste computacional):
+        # 1. Calculamos la desviación estándar del ROI. Una alta desviación indica una discontinuidad 
+        #    muy marcada (como el borde de un escalón).
+        # 2. Revisamos el promedio del 5% inferior. Si de la nada está muy "lejos" (valores bajos), 
+        #    hay un corte de la superficie o una caída.
+        
+        std_dev = np.std(roi)
+        roi_bottom_5_percent = depth_map_8bit[int(h * 0.95):h, :]
+        mean_bottom = np.mean(roi_bottom_5_percent)
+        
+        # Umbrales ajustables empíricamente (probablemente requieran tuneo)
+        umbral_std = 35.0         # Discontinuidad / corte en el plano del suelo
+        umbral_profundidad = 80.0 # Indica que los pies apuntan "al vacío" (valores alejados)
+        
+        peligro_detectado = False
+        if std_dev > umbral_std and mean_bottom < umbral_profundidad:
+            peligro_detectado = True
+            
+        return depth_map_8bit, peligro_detectado
 
-        # Carga del modelo desde torch.hub
-        print("[MiDaS] Cargando modelo MiDaS_small desde torch.hub...")
-        self.modelo = torch.hub.load(
-            MIDAS_REPO,
-            MIDAS_MODELO,
-            pretrained=True,
-            trust_repo=True
-        )
-
-        # Modo evaluación + FP16 en GPU
-        # .half() convierte pesos a float16, reduciendo VRAM ~50%
-        # y acelerando la inferencia en GPUs NVIDIA con Tensor Cores.
-        self.modelo.to(self.device)
-        if self.device.type == "cuda":
-            self.modelo = self.modelo.half()   # FP16 solo en GPU
-        self.modelo.eval()
-        print("[MiDaS] Modelo listo en modo evaluación "
-              f"({'FP16/CUDA' if self.device.type == 'cuda' else 'FP32/CPU'}).")
-
-        # Carga de transforms nativos de MiDaS_small
-        transforms = torch.hub.load(
-            MIDAS_REPO,
-            "transforms",
-            trust_repo=True
-        )
-        # MiDaS_small usa el transform "small_transform"
-        self.transform = transforms.small_transform
-        print("[MiDaS] Transforms cargados (small_transform).")
-
-    # MÉTODO PRINCIPAL: PROCESAR FRAME
-
-    def procesar_frame(
-        self,
-        frame_bgr: np.ndarray
-    ) -> tuple[np.ndarray, bool]:
-        alto, ancho = frame_bgr.shape[:2]
-
-        # 1. Pre-procesado con transforms de MiDaS
-        # MiDaS espera imágenes en RGB
-        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        entrada = self.transform(frame_rgb).to(self.device)
-
-        # Convertir tensor a FP16 si estamos en GPU
-        if self.device.type == "cuda":
-            entrada = entrada.half()
-
-        # 2. Inferencia (sin gradientes para rendimiento)
-        with torch.no_grad():
-            prediccion = self.modelo(entrada)
-
-            # Reescalar la salida al tamaño original del frame
-            prediccion = torch.nn.functional.interpolate(
-                prediccion.unsqueeze(1),       # añade canal: (1, 1, H, W)
-                size=(alto, ancho),
-                mode="bicubic",
-                align_corners=False,
-            ).squeeze()                        # elimina dimensiones extra
-
-        # 3. Pasar a CPU y convertir a NumPy
-        # .float() convierte de FP16 → FP32 antes de .numpy()
-        mapa_profundidad = prediccion.cpu().float().numpy()
-
-        # 4. Normalización a uint8 (0–255)
-        prof_min = mapa_profundidad.min()
-        prof_max = mapa_profundidad.max()
-        rango = prof_max - prof_min
-
-        if rango > 1e-6:
-            mapa_norm = (mapa_profundidad - prof_min) / rango
-        else:
-            mapa_norm = np.zeros_like(mapa_profundidad)
-
-        mapa_visualizable = (mapa_norm * 255).astype(np.uint8)
-
-        # 5. Detección de escalones en ROI
-        peligro_escaleras = self._detectar_peligro_escaleras(
-            mapa_profundidad, alto
-        )
-
-        return mapa_visualizable, peligro_escaleras
-
-    # LÓGICA DE DETECCIÓN DE ESCALERAS / CAÍDAS
-
-    def _detectar_peligro_escaleras(
-        self,
-        mapa_profundidad: np.ndarray,
-        alto_frame: int
-    ) -> bool:
-        # Extraer ROI: 30% inferior
-        inicio_roi = int(alto_frame * (1.0 - ROI_FRACCION_INFERIOR))
-        roi = mapa_profundidad[inicio_roi:, :]
-
-        # Normalizar ROI a uint8 para Sobel
-        roi_min = roi.min()
-        roi_max = roi.max()
-        rango = roi_max - roi_min
-
-        if rango < 1e-6:
-            # Sin variación de profundidad → no hay peligro
-            return False
-
-        roi_norm = ((roi - roi_min) / rango * 255).astype(np.uint8)
-
-        # Gradiente vertical con Sobel
-        # Sobel en dirección Y detecta cambios verticales de profundidad.
-        # ksize=3 es suficientemente rápido para tiempo real.
-        gradiente_y = cv2.Sobel(roi_norm, cv2.CV_32F, dx=0, dy=1, ksize=3)
-
-        # Desviación estándar del gradiente
-        # Un std alto indica bordes fuertes de profundidad (escalones).
-        std_gradiente = float(np.std(np.abs(gradiente_y)))
-
-        # Descomenta para calibrar el umbral durante pruebas:
-        # print(f"[DEBUG] std_gradiente ROI: {std_gradiente:.2f}")
-
-        return std_gradiente > UMBRAL_STD_GRADIENTE
-
-
-# ENTORNO DE PRUEBA
-
-if __name__ == "__main__":
-
-    print("Módulo MiDaS — Prueba con Cámara Web Local")
-
-    # Inicializar estimador
-    estimador = EstimadorProfundidadMiDaS()
-
-    # Abrir cámara web
+def main():
+    print("Iniciando Módulo MiDaS - Detector de Escalones y Precipicios...")
+    
+    # Instanciamos la clase, lo cual cargará el modelo en la VRAM
+    detector = MidasDepthEstimator()
+    
+    # Iniciar la cámara web (índice 0 por defecto)
     cap = cv2.VideoCapture(0)
+    
     if not cap.isOpened():
-        raise RuntimeError(
-            "[ERROR] No se pudo abrir la cámara web (índice 0). "
-            "Verifica que no esté en uso por otra aplicación."
-        )
-
-    # Resolución de captura (más baja → más FPS)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-
-    print("\n[PRUEBA] Cámara abierta. Presiona 'q' para salir.\n")
-
-    # Variables para calcular FPS
-    tiempo_anterior = time.perf_counter()
-    fps_suavizado = 0.0
-    alpha_ema = 0.1  # factor de suavizado exponencial
-
-    # Colores para la UI
-    COLOR_ROI_NORMAL  = (0, 255, 0)    # verde
-    COLOR_ROI_PELIGRO = (0, 0, 255)    # rojo
-    COLOR_TEXTO       = (255, 255, 255) # blanco
-
+        print("Error crítico: Problemas al abrir la cámara local.")
+        return
+        
+    print("\nPuedes presionar 'q' sobre la ventana de video en cualquier momento para salir.\n")
+    
+    # Marcador para mostrar FPS en tiempo real
+    prev_time = time.time()
+    
     while True:
         ret, frame = cap.read()
         if not ret:
-            print("[PRUEBA] No se pudo leer el frame. Reintentando...")
-            continue
-
-        alto, ancho = frame.shape[:2]
-
-        # Inferencia MiDaS
-        mapa_uint8, peligro = estimador.procesar_frame(frame)
-
-        # Calcular FPS con media móvil exponencial
-        tiempo_actual = time.perf_counter()
-        fps_instantaneo = 1.0 / max(tiempo_actual - tiempo_anterior, 1e-9)
-        fps_suavizado = (1 - alpha_ema) * fps_suavizado + alpha_ema * fps_instantaneo
-        tiempo_anterior = tiempo_actual
-
-        # Aplicar colormap al mapa de profundidad
-        mapa_color = cv2.applyColorMap(mapa_uint8, cv2.COLORMAP_JET)
-
-        # Coordenadas del ROI (30% inferior)
-        inicio_roi_y = int(alto * (1.0 - ROI_FRACCION_INFERIOR))
-        color_roi = COLOR_ROI_PELIGRO if peligro else COLOR_ROI_NORMAL
-
-        # Dibujar rectángulo ROI en frame original
-        frame_display = frame.copy()
-        grosor_rect = 2 if not peligro else 3
-        cv2.rectangle(
-            frame_display,
-            pt1=(0, inicio_roi_y),
-            pt2=(ancho - 1, alto - 1),
-            color=color_roi,
-            thickness=grosor_rect
-        )
-
-        # Etiqueta de la ROI
-        cv2.putText(
-            frame_display,
-            "ZONA DE SUELO (ROI)",
-            org=(10, inicio_roi_y - 8),
-            fontFace=cv2.FONT_HERSHEY_SIMPLEX,
-            fontScale=0.55,
-            color=color_roi,
-            thickness=1,
-            lineType=cv2.LINE_AA
-        )
-
-        # Alerta visual si hay peligro
-        if peligro:
-            # Banner rojo semitransparente en la parte superior
-            overlay = frame_display.copy()
-            cv2.rectangle(overlay, (0, 0), (ancho, 60), (0, 0, 200), -1)
-            cv2.addWeighted(overlay, 0.5, frame_display, 0.5, 0, frame_display)
-
-            cv2.putText(
-                frame_display,
-                "!!! ESCALERAS DETECTADAS !!!",
-                org=(10, 42),
-                fontFace=cv2.FONT_HERSHEY_DUPLEX,
-                fontScale=0.9,
-                color=(255, 255, 255),
-                thickness=2,
-                lineType=cv2.LINE_AA
-            )
-            # También alerta en mapa de profundidad
-            cv2.putText(
-                mapa_color,
-                "PELIGRO",
-                org=(10, 30),
-                fontFace=cv2.FONT_HERSHEY_SIMPLEX,
-                fontScale=0.8,
-                color=(0, 0, 255),
-                thickness=2,
-                lineType=cv2.LINE_AA
-            )
-            # Imprimir en consola
-            print("[ALERTA] !!! ESCALERAS / PRECIPICIO DETECTADO !!!")
-
-        # Mostrar FPS en ambas ventanas
-        texto_fps = f"FPS: {fps_suavizado:.1f}"
-        cv2.putText(
-            frame_display, texto_fps,
-            org=(ancho - 110, 25),
-            fontFace=cv2.FONT_HERSHEY_SIMPLEX,
-            fontScale=0.6,
-            color=COLOR_TEXTO,
-            thickness=1,
-            lineType=cv2.LINE_AA
-        )
-        cv2.putText(
-            mapa_color, texto_fps,
-            org=(ancho - 110, 25),
-            fontFace=cv2.FONT_HERSHEY_SIMPLEX,
-            fontScale=0.6,
-            color=COLOR_TEXTO,
-            thickness=1,
-            lineType=cv2.LINE_AA
-        )
-
-        # Dibujar línea de inicio de ROI en el mapa
-        cv2.line(mapa_color, (0, inicio_roi_y), (ancho, inicio_roi_y),
-                 color_roi, 2)
-
-        # Mostrar ventanas
-        cv2.imshow("Frame Original — MiDaS Demo", frame_display)
-        cv2.imshow("Mapa de Profundidad (COLORMAP_JET)", mapa_color)
-
-        # Salir con 'q'
-        if cv2.waitKey(1) & 0xFF == ord("q"):
-            print("\n[PRUEBA] Saliendo por solicitud del usuario.")
+            print("No se pudo obtener el frame de la cámara. Finalizando stream.")
             break
-
-    # Liberación de recursos
+            
+        # Calcular FPS del frame actual
+        current_time = time.time()
+        fps = 1.0 / (current_time - prev_time)
+        prev_time = current_time
+            
+        # 1. Ejecutar todo nuestro pipeline MiDaS
+        depth_map_8bit, peligro = detector.estimate_depth_and_danger(frame)
+        
+        # 2. Construir la Visualización
+        # Aplicar el mapa de colores JET sobre la escala de grises de 8-bit para apreciar calor
+        depth_colormap = cv2.applyColorMap(depth_map_8bit, cv2.COLORMAP_JET)
+        
+        h, w, _ = frame.shape
+        roi_top = int(h * 0.7)
+        
+        # Preparar indicadores visuales basados en si hay o no peligro
+        color_interfaz = (0, 255, 0) # Verde: Seguro (BGR en OpenCV)
+        texto_estado = "Suelo detectado"
+        
+        if peligro:
+            color_interfaz = (0, 0, 255) # Rojo: Peligro inminente (BGR)
+            texto_estado = "!!! ESCALERAS DETECTADAS !!!"
+            # Alertar a consola
+            print(f"[{time.strftime('%H:%M:%S')}] {texto_estado}")
+        
+        # Dibujar un rectángulo sobre el frame indicando nuestro 30% inferior (el ROI de análisis)
+        cv2.rectangle(frame, (0, roi_top), (w, h), color_interfaz, 2)
+        
+        # Estampar la información y los FPS
+        cv2.putText(frame, texto_estado, (15, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, color_interfaz, 2, cv2.LINE_AA)
+        cv2.putText(frame, f"FPS: {fps:.1f}", (15, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2, cv2.LINE_AA)
+        cv2.putText(frame, "Caja = 30% ROI", (w - 180, h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color_interfaz, 2)
+        
+        # Mostrar el frame procesado y el mapa de calor independientemente
+        cv2.imshow("Original + ROI Midas", frame)
+        cv2.imshow("Mapa de Profundidad MiDaS", depth_colormap)
+        
+        # Escuchar eventos de la GUI, salir con 'q'
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+            
+    # Liberar recursos y VRAM
     cap.release()
     cv2.destroyAllWindows()
-    print("[PRUEBA] Recursos liberados. Fin del programa.")
+
+if __name__ == "__main__":
+    main()
