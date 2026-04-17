@@ -19,7 +19,6 @@ CÓMO CALIBRAR CONSTANTE_FOCAL (antes del demo):
     5. Verifica: a 2 metros debe reportar ~2.0 m.
 """
 
-import io
 import os
 import cv2
 import time
@@ -27,19 +26,6 @@ import queue
 import threading
 import numpy as np
 import pygame
-from dotenv import load_dotenv
-
-from elevenlabs.client import ElevenLabs
-from elevenlabs import VoiceSettings
-
-# Leer API key desde .env
-load_dotenv()
-ELEVENLABS_API_KEY  = os.getenv("ELEVENLABS_API_KEY", "")
-
-# Voz activa: "Cristina Campos - Natural Conversations" (eleven_multilingual_v2)
-# Perfil: Mujer adulta, acento mexicano, tono conversacional y amigable
-# Copia tu ID desde: https://api.elevenlabs.io/v1/voices
-ELEVENLABS_VOICE_ID = "CaJslL1xziwefCeTNzHv"
 
 # Constante de calibración de distancia (ver instrucciones en docstring)
 CONSTANTE_FOCAL = 350.0
@@ -118,12 +104,6 @@ class AudioWorker:
 
             self._cola.task_done()
 
-            # -- ElevenLabs (reservado para cuando se reactive la nube) --
-            # from elevenlabs.client import ElevenLabs
-            # cliente = ElevenLabs(api_key=os.getenv('ELEVENLABS_API_KEY', ''))
-            # audio_stream = cliente.text_to_speech.convert(text=texto, ...)
-            # pygame.mixer.music.load(io.BytesIO(b''.join(audio_stream)), 'mp3')
-
 
 # GestorCooldown: anti-spam por clase de objeto
 
@@ -174,12 +154,6 @@ def construir_alerta(nombre: str, distancia: float, posicion: str) -> str:
 
 
 def construir_nombre_audio(nombre_clase: str, posicion_str: str) -> str:
-    """
-    [LEGACY] Genera la ruta al MP3 sin dimensión de distancia.
-    Mantenida por compatibilidad. Preferir obtener_archivo_audio() para el
-    catálogo completo con distancia.
-    Formato: audios/{clase}_{posicion_simple}.mp3
-    """
     mapa_pos = {
         "a tu izquierda": "izquierda",
         "al frente":      "frente",
@@ -190,20 +164,7 @@ def construir_nombre_audio(nombre_clase: str, posicion_str: str) -> str:
 
 
 def _redondear_escalon(distancia_metros: float) -> float:
-    """
-    Redondeo Escalón (Binning): aproxima la distancia continua de MiDaS
-    al escalón pregrabado más cercano dentro de ESCALONES_DISTANCIA.
 
-    Reglas de tope:
-        - Si distancia < mínimo disponible → usa el primer escalón
-        - Si distancia > máximo disponible → usa el último escalón (tope)
-
-    Ejemplo (escalones = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]):
-        0.3  m → 0.5
-        1.2  m → 1.0   (más cercano a 1.0 que a 1.5)
-        1.8  m → 2.0
-        4.5  m → 3.0   (tope)
-    """
     if not ESCALONES_DISTANCIA:
         return distancia_metros
 
@@ -225,27 +186,8 @@ def obtener_archivo_audio(
     posicion: str,          # Valor devuelto por posicion_en_frame() (texto largo)
     distancia_metros: float,
 ) -> None:
-    """
-    Enrutador lógico de audio con Binning de distancia.
 
-    Flujo:
-        1. Traduce la posición larga a clave corta (ej. "a tu izquierda" → "izquierda").
-        2. Redondea la distancia continua de MiDaS al escalón más cercano pregrabado.
-        3. Construye el nombre de archivo esperado (ej. "silla_izquierda_1_0.mp3").
-        4. Si el archivo existe → lo encola en AudioWorker para reproducción inmediata.
-        5. Si NO existe → intenta el beep.mp3 de fallback; si tampoco existe, silencio.
-
-    Parámetros:
-        audio_worker      : AudioWorker instanciado en main_vision.py
-        clase_nombre      : Nombre de clase de YOLO en español (ej. "silla", "persona")
-        posicion          : Salida de posicion_en_frame() (ej. "a tu izquierda")
-        distancia_metros  : Distancia estimada por calcular_distancia_metros()
-
-    Retorna:
-        None (encola directamente en audio_worker)
-    """
-
-    # --- 1. Traducir posición larga a clave de nombre de archivo ---
+    # 1. Traducir posición larga a clave de nombre de archivo
     mapa_pos = {
         "a tu izquierda": "izquierda",
         "al frente":      "frente",
@@ -253,23 +195,22 @@ def obtener_archivo_audio(
     }
     pos_clave = mapa_pos.get(posicion, "frente")
 
-    # --- 2. Redondeo Escalón: aproximar distancia al step pregrabado más cercano ---
+    # 2. Redondeo Escalón: aproximar distancia al step pregrabado más cercano
     dist_binned = _redondear_escalon(distancia_metros)
 
-    # --- 3. Construir nombre del archivo (ej. "silla_izquierda_1_0.mp3") ---
+    # 3. Construir nombre del archivo (ej. "silla_izquierda_1_0.mp3")
     # La distancia se formatea como float con 1 decimal y el punto reemplazado por _
     dist_sufijo    = f"{dist_binned:.1f}".replace(".", "_")
     nombre_archivo = f"{clase_nombre}_{pos_clave}_{dist_sufijo}.mp3"
     ruta_audio     = os.path.join(DIRECTORIO_AUDIO, nombre_archivo)
 
-    # --- 4. Verificar existencia y encolar ---
+    # 4. Verificar existencia y encolar
     if os.path.exists(ruta_audio):
         # Caso normal: archivo pregrabado encontrado → reproducir
         audio_worker.encolar(ruta_audio)
 
     else:
-        # --- 5. Fallback: beep genérico si el MP3 específico no existe ---
-        # Esto cubre casos límite como clases nuevas no incluidas en CLASES del generador
+        # 5. Fallback: beep genérico si el MP3 específico no existe
         print(
             f"[AUDIO][WARN] Archivo no encontrado: '{ruta_audio}'. "
             f"Ejecuta generador_audios.py para generarlo."
