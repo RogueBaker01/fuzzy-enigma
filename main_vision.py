@@ -25,30 +25,20 @@ from fusion_logica import (
     DIRECTORIO_AUDIO,
 )
 
-# ---------------------------------------------------------------------------
 # URL del stream RTSP/HTTP del teléfono (modo legacy con cap.VideoCapture).
 # Aplicaciones compatibles: DroidCam, IP Webcam (Android) | EpocCam (iOS)
-# ---------------------------------------------------------------------------
-FUENTE_TELEFONO_URL = "http://192.168.1.100:8080/video"  # <-- cambia la IP
+FUENTE_TELEFONO_URL = "http://[IP_ADDRESS]/video"  # <-- cambia la IP
 
-# ---------------------------------------------------------------------------
 # Configuración del servidor WebSocket (modo websocket).
 # Usa el mismo puerto que servidor.py para ser compatible.
 # El teléfono debe conectarse a: ws://<IP_DE_ESTA_PC>:8081
 # y enviar cada frame como un paquete binario JPEG.
-# ---------------------------------------------------------------------------
 WS_PUERTO   = 8081
 _frame_queue: queue.Queue = queue.Queue(maxsize=2)  # Buffer de frames WS
 
 
 def _iniciar_ws_receiver() -> None:
-    """
-    Arranca un servidor WebSocket en un thread daemon que:
-      1. Escucha en el mismo puerto que servidor.py (WS_PUERTO = 8081).
-      2. Recibe paquetes binarios JPEG del teléfono (igual que servidor.py).
-      3. Decodifica cada paquete a un frame BGR y lo mete en _frame_queue.
-    El loop principal de main() consume los frames de _frame_queue.
-    """
+
     import websockets  # import local para no forzar la dep en modos que no la usan
 
     async def _handler(websocket):
@@ -89,11 +79,7 @@ def _iniciar_ws_receiver() -> None:
 
 
 def resolver_fuente_video(modo: str):
-    """
-    Resuelve la fuente de video según el modo seleccionado.
-    Para 'websocket' retorna (None, 'WEBSOCKET') — se usa _frame_queue en lugar de cap.
-    Para el resto retorna (src, etiqueta).
-    """
+
     if modo == "webcam":
         print("[FUENTE] Modo: Cámara web local (dispositivo 0)")
         return 0, "WEBCAM"
@@ -123,7 +109,7 @@ def resolver_fuente_video(modo: str):
 
 
 def main():
-    # --- Selección de fuente de video vía argumento CLI ---
+    # Selección de fuente de video vía argumento CLI 
     parser = argparse.ArgumentParser(
         description="Sistema Asistente Visual — Edge Computing YOLOv8 + MiDaS"
     )
@@ -158,7 +144,7 @@ def main():
     # 3. Fuente de video (seleccionada por CLI)
     src, etiqueta_fuente = resolver_fuente_video(args.fuente)
 
-    # --- Rama WebSocket: servidor integrado compatible con servidor.py ---
+    # Rama WebSocket: servidor integrado compatible con servidor.py 
     if args.fuente == "websocket":
         _iniciar_ws_receiver()  # Arranca el servidor WS en thread de fondo
 
