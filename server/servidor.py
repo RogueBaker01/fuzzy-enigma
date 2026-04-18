@@ -28,11 +28,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 continue
 
             if frame is not None:
-                # ---------------------------------------------------------
-                # --- AQUÍ TUS COMPAÑEROS DEBEN PEGAR YOLO Y MIDAS ---
-                # resultado_yolo = modelo_yolo(frame)
-                # mapa_profundidad = modelo_midas(frame)
-                # ---------------------------------------------------------
+               #yolo/midas
+            
+               
                 
                 # 3. Calcular la velocidad (Latencia y FPS)
                 end_time = time.time()
