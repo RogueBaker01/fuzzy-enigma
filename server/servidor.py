@@ -1,19 +1,24 @@
-import React, { useEffect, useRef } from 'react';
-import { StyleSheet, Text, View } from 'react-native';
-import { CameraView, useCameraPermissions } from 'expo-camera';
-import { useKeepAwake } from 'expo-keep-awake';
+import asyncio
+from fastapi import FastAPI, WebSocket
+import base64
+import cv2
+import numpy as np
+import time
 
-export default function Index() {
-    // Mantiene tu pantalla encendida
-    useKeepAwake();  
+app = FastAPI()
 
-    const [permission, requestPermission] = useCameraPermissions();
-    const cameraRef = useRef<CameraView>(null);
-    const ws = useRef<WebSocket | null>(null);
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    print("¡Conexión establecida con el teléfono!")
     
-    // BANDERA DE BLOQUEO: Evita que se sature la cámara
-    const isProcessing = useRef(false);
+    try:
+        while True:
+            # 1. Recibir datos del celular e iniciar cronómetro
+            data = await websocket.receive_text()
+            start_time = time.time() 
 
+<<<<<<< HEAD
     useEffect(() => {
         (async () => {
             await requestPermission();
@@ -23,67 +28,35 @@ export default function Index() {
             ws.current.onopen = () => console.log("¡Conectado!");
             ws.current.onerror = (e) => console.log("Error WS:", e);
         })();
+=======
+            # 2. Decodificar la imagen a formato OpenCV
+            try:
+                img_bytes = base64.b64decode(data)
+                nparr = np.frombuffer(img_bytes, np.uint8)
+                frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            except Exception as e:
+                print(f"Error decodificando imagen: {e}")
+                continue
+>>>>>>> 81ce2caf6b1e496d8752078373d4b934c714bc3a
 
-        return () => {
-            if (ws.current) {
-                ws.current.close();
-            }
-        };
-    }, []);
-
-    const sendFrame = async () => {
-        if (isProcessing.current) return;
-        
-        if (cameraRef.current && ws.current?.readyState === WebSocket.OPEN) {
-            isProcessing.current = true; 
-            
-            try {
-                const photo = await cameraRef.current.takePictureAsync({
-                    quality: 0.1,
-                    base64: true,
-                    skipProcessing: true,
-                });
+            if frame is not None:
+                # ---------------------------------------------------------
+                # --- AQUÍ TUS COMPAÑEROS DEBEN PEGAR YOLO Y MIDAS ---
+                # resultado_yolo = modelo_yolo(frame)
+                # mapa_profundidad = modelo_midas(frame)
+                # ---------------------------------------------------------
                 
-                if (photo && photo.base64) {
-                    ws.current.send(photo.base64);
-                }
-            } catch (err) {
-                console.log("Error capturando frame:", err);
-            } finally {
-                isProcessing.current = false; 
-            }
-        }
-    };
-
-    useEffect(() => {
-        // Configuramos a 33ms para apuntar a los 30 FPS estables
-        const interval = setInterval(sendFrame, 33);
-        return () => clearInterval(interval);
-    }, []);
-
-    if (!permission) return <View />;
-    if (!permission.granted) return <Text>No hay acceso a la cámara</Text>;
-
-    return (
-        <View style={styles.container}>
-            <CameraView style={styles.camera} ref={cameraRef} facing="back" />
-            
-            <View style={styles.overlay}>
-                <Text style={styles.text}>Asistente Visual Conectado</Text>
-            </View>
-        </View>
-    );
-}
-
-const styles = StyleSheet.create({
-    container: { flex: 1, backgroundColor: '#000' },
-    camera: { flex: 1 },
-    overlay: { 
-        position: 'absolute',
-        bottom: 50, 
-        left: 0, 
-        right: 0, 
-        alignItems: 'center' 
-    },
-    text: { color: 'white', backgroundColor: 'rgba(0,0,0,0.7)', padding: 15, borderRadius: 20 }
-});
+                # 3. Calcular la velocidad (Latencia y FPS)
+                end_time = time.time()
+                duracion = end_time - start_time
+                
+                latencia_ms = duracion * 1000
+                fps = 1.0 / duracion if duracion > 0 else 0
+                
+                # Imprimir los resultados en la terminal ruda
+                print(f"DEBUG | Latencia: {latencia_ms:.2f} ms | FPS: {fps:.1f}")
+                
+    except Exception as e:
+        print(f"Conexión cerrada o error: {e}")
+    finally:
+        await websocket.close()
