@@ -93,14 +93,24 @@ class AudioWorker:
         self._interrupcion_activa = threading.Event()
 
         if not pygame.mixer.get_init():
-            pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
+            # Mantener channels=1 (mono) para máxima compatibilidad con los MP3 pregrabados
+            # y con versiones anteriores de pygame que no soportan bien SDARS estéreo.
+            pygame.mixer.init(frequency=44100, size=-16, channels=1, buffer=512)
 
         # Canal dedicado para beeps de proximidad (no pasa por la cola de MP3)
         pygame.mixer.set_num_channels(4)
         self._canal_beep = pygame.mixer.Channel(1)
-        # Pre-generar dos tonos de beep: normal y urgente
-        self._beep_normal  = self._generar_tono(freq_hz=880,  duracion_ms=120, volumen=0.7)
-        self._beep_urgente = self._generar_tono(freq_hz=1320, duracion_ms=80,  volumen=0.9)
+
+        # Pre-generar tonos de beep. Se envuelve en try/except para que un
+        # fallo aquí (p.ej. pygame ya inicializado con otra configuración)
+        # NO rompa el AudioWorker ni deje sin audio el resto del sistema.
+        try:
+            self._beep_normal  = self._generar_tono(freq_hz=880,  duracion_ms=120, volumen=0.7)
+            self._beep_urgente = self._generar_tono(freq_hz=1320, duracion_ms=80,  volumen=0.9)
+        except Exception as e:
+            print(f"[AudioWorker] Beep sintético no disponible: {e}. MP3 siguen funcionando.")
+            self._beep_normal  = None
+            self._beep_urgente = None
 
         self._hilo = threading.Thread(
             target=self._loop_audio, daemon=True, name="AudioWorker"
@@ -155,9 +165,11 @@ class AudioWorker:
         urgente=True  → tono más agudo y breve (objeto a <0.5 m)
         urgente=False → tono estándar (objeto a 0.5–0.8 m)
         """
+        sonido = self._beep_urgente if urgente else self._beep_normal
+        if sonido is None:
+            return   # Beep descartado (fallo en generación, MP3 siguen OK)
         if self._canal_beep.get_busy():
             return   # Ya suena un beep, no apilar
-        sonido = self._beep_urgente if urgente else self._beep_normal
         self._canal_beep.play(sonido)
 
     def detener(self):
@@ -211,20 +223,30 @@ class AudioWorker:
 
     @staticmethod
     def _generar_tono(
-        freq_hz: int   = 880,
+        freq_hz: int     = 880,
         duracion_ms: int = 120,
         volumen: float   = 0.75,
-    ) -> pygame.mixer.Sound:
-        """Genera un tono puro (seno) como Sound de pygame sin necesitar ningún archivo.
-        Funciona aunque el directorio audios/ no tenga un beep.mp3.
+    ) -> "pygame.mixer.Sound":
+        """Genera un tono sinusoidal puro como Sound de pygame.
+        Se adapta automáticamente a la configuración real del mixer
+        (mono channels=1 o estéreo channels=2).
         """
-        sample_rate = 44100
+        info = pygame.mixer.get_init()  # (frequency, size, channels) o None
+        if not info:
+            raise RuntimeError("pygame.mixer no está inicializado")
+        sample_rate = info[0]
+        n_channels  = info[2]   # 1=mono, 2=estéreo
+
         n = int(sample_rate * duracion_ms / 1000)
         t = np.linspace(0, duracion_ms / 1000.0, n, endpoint=False)
         onda = (np.sin(2 * np.pi * freq_hz * t) * volumen * 32767).astype(np.int16)
-        # pygame.mixer.init con channels=2 requiere audio estéreo
-        onda_stereo = np.column_stack([onda, onda])
-        return pygame.sndarray.make_sound(onda_stereo)
+
+        if n_channels == 2:
+            # pygame.sndarray.make_sound con mixer estéreo necesita shape (n, 2)
+            return pygame.sndarray.make_sound(np.column_stack([onda, onda]))
+        else:
+            # Mixer mono: array 1D
+            return pygame.sndarray.make_sound(onda)
 
 
 # GestorCooldown: anti-spam por clase de objeto
