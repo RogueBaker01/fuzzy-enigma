@@ -27,9 +27,10 @@ from fusion_logica import (
     DIRECTORIO_AUDIO,
 )
 
-# URL del stream RTSP/HTTP del teléfono
-
-FUENTE_TELEFONO_URL = "http://[IP_ADDRESS]/video"
+# Construye la URL de la cámara IP a partir de solo la IP.
+# La mayoría de apps de cámara IP (p.ej. IP Webcam para Android) usan este formato:
+def _url_camara_ip(ip: str) -> str:
+    return f"http://{ip}:8080/video"
 
 # Configuración del servidor WebSocket
 WS_PUERTO   = 8081
@@ -113,15 +114,20 @@ def main():
     )
     parser.add_argument(
         "--fuente",
-        choices=["archivo", "webcam", "telefono", "websocket"],
+        choices=["archivo", "webcam", "camara_ip", "websocket"],
         default="archivo",
         help=(
             "Fuente de video: "
-            "'archivo'   = videoplayback2.mp4 (default), "
-            "'webcam'    = cámara local (dispositivo 0), "
-            "'telefono'  = stream HTTP/RTSP del teléfono, "
-            "'websocket' = frames JPEG via WebSocket (puerto 8081, compatible con servidor.py)"
+            "'archivo'    = videoplayback2.mp4 (default), "
+            "'webcam'     = cámara local (dispositivo 0), "
+            "'camara_ip'  = cámara IP (pasa la IP con --ip), "
+            "'websocket'  = frames JPEG via WebSocket (puerto 8081)"
         ),
+    )
+    parser.add_argument(
+        "--ip",
+        default="192.168.1.100",
+        help="IP de la cámara IP, solo cuando --fuente camara_ip. Ejemplo: --ip 192.168.1.50",
     )
     args = parser.parse_args()
 
@@ -293,11 +299,12 @@ def main():
 
     if not cap.isOpened():
         print(f"[ERROR] No se puede abrir la fuente de video: '{src}'")
-        if args.fuente == "telefono":
+        if args.fuente == "camara_ip":
             print("[AYUDA] Asegúrate de que:")
-            print("1. El teléfono y la PC estén en la misma red Wi-Fi")
-            print("2. La app de streaming esté corriendo en el teléfono")
-            print(f"3. La IP en FUENTE_TELEFONO_URL sea correcta: {FUENTE_TELEFONO_URL}")
+            print(f"1. La IP '{args.ip}' sea la correcta (la que muestra la app)")
+            print("2. El teléfono y la PC estén en la misma red Wi-Fi")
+            print("3. La app de cámara IP esté abierta y transmitiendo")
+            print(f"   URL intentada: {_url_camara_ip(args.ip)}")
         audio.detener()
         return
 
