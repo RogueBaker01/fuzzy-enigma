@@ -26,6 +26,12 @@ class MidasDepthEstimator:
         midas_transforms = torch.hub.load("intel-isl/MiDaS", "transforms")
         self.transform = midas_transforms.small_transform
 
+        # Suavizado temporal (EMA) para estabilizar el mapa de profundidad entre frames.
+        # α alto = más peso al frame actual (respuesta rápida);
+        # α bajo = más suavizado (menos jitter, mayor latencia de reacción).
+        self._ema_alpha: float = 0.6
+        self._depth_anterior: np.ndarray | None = None
+
     @torch.no_grad() # Desactivar el cálculo de gradientes es CRÍTICO para inferencia rápida
     def estimate_depth_and_danger(self, frame):
 
@@ -68,7 +74,22 @@ class MidasDepthEstimator:
             
         # Escalar a valores uint8
         depth_map_8bit = (depth_map_normalized * 255.0).astype(np.uint8)
-        
+
+        # 3b. Suavizado temporal — EMA entre frames
+        # Elimina el jitter causado por la renormalización min-max frame a frame.
+        if self._depth_anterior is not None:
+            depth_map_8bit = (
+                self._ema_alpha * depth_map_8bit.astype(np.float32)
+                + (1.0 - self._ema_alpha) * self._depth_anterior.astype(np.float32)
+            ).astype(np.uint8)
+        self._depth_anterior = depth_map_8bit
+
+        # 3c. Suavizado espacial — Gaussian Blur (5×5)
+        # Reduce ruido de alta frecuencia (reflejos, texturas de piso) antes de
+        # calcular std_dev en el ROI inferior. Los bordes reales de un escalón
+        # tienen discontinuidades de >10 px y sobreviven al blur.
+        depth_map_8bit = cv2.GaussianBlur(depth_map_8bit, (5, 5), 0)
+
         # 4. Lógica de Detección de Peligro (Escaleras/Precipicio hacia abajo)
         # ROI inferior: el 30% más bajo del frame
         h, w = depth_map_8bit.shape

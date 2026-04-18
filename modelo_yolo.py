@@ -4,7 +4,7 @@ import torch
 import pygame
 from ultralytics import YOLO
 
-# Clases de COCO relevantes para navegación
+# Clases de COCO relevantes para navegación peatonal
 CLASES_OBSTACULOS = {
     0:  "persona",
     1:  "bicicleta",
@@ -12,6 +12,10 @@ CLASES_OBSTACULOS = {
     3:  "moto",
     5:  "autobús",
     7:  "camión",
+    13: "banca",
+    24: "mochila",
+    25: "paraguas",
+    28: "maleta",
     56: "silla",
     57: "sofá",
     59: "cama",
@@ -26,12 +30,14 @@ def nombrar_objetos(cantidad: int, nombre_singular: str) -> str:
     generos = {
         'persona': 'una', 'bicicleta': 'una', 'moto': 'una',
         'coche': 'un', 'autobús': 'un', 'camión': 'un',
+        'banca': 'una', 'mochila': 'una', 'paraguas': 'un', 'maleta': 'una',
         'silla': 'una', 'sofá': 'un', 'cama': 'una', 'mesa': 'una',
         'televisión': 'una', 'laptop': 'una', 'teléfono': 'un',
     }
     plurales = {
         'persona': 'personas', 'bicicleta': 'bicicletas', 'moto': 'motos',
         'coche': 'coches', 'autobús': 'autobuses', 'camión': 'camiones',
+        'banca': 'bancas', 'mochila': 'mochilas', 'paraguas': 'paraguas', 'maleta': 'maletas',
         'silla': 'sillas', 'sofá': 'sofás', 'cama': 'camas', 'mesa': 'mesas',
         'televisión': 'televisiones', 'laptop': 'laptops', 'teléfono': 'teléfonos',
     }
@@ -41,7 +47,7 @@ def nombrar_objetos(cantidad: int, nombre_singular: str) -> str:
 
 class YoloDetector:
 
-    def __init__(self, model_path: str = "yolov8n.pt", conf: float = 0.45):
+    def __init__(self, model_path: str = "yolov8s.pt", conf: float = 0.40):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"[YoloDetector] Iniciando en: {self.device}")
 

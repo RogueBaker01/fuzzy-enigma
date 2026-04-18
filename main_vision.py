@@ -178,7 +178,7 @@ def main():
 
     print("[2/3] Cargando MiDaS_small (FP16)...")
     midas        = MidasDepthEstimator()
-    midas_worker = MidasWorker(midas, escala=0.5)  # Hilo de fondo, no bloquea el loop
+    midas_worker = MidasWorker(midas, escala=0.6)  # Hilo de fondo, no bloquea el loop
 
     # 2. Iniciar módulo de audio y cooldowns
     print("[3/3] Iniciando AudioWorker (MP3 locales)...")

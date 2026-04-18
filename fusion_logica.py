@@ -288,17 +288,19 @@ def obtener_archivo_audio(
         "bicicleta":    "bicicleta",
         "coche":        "automovil",
         "moto":         "motocicleta",
-        "autob\u00fas":       "automovil",   # no hay MP3 de autobús, usar automóvil
-        "cami\u00f3n":       "automovil",   # no hay MP3 de camión, usar automóvil
-        "silla":        "silla",
-        "sof\u00e1":         "sofa",
-        "cama":         "silla",        # fallback
-        "mesa":         "mesa",
-        "televisi\u00f3n":   "televisor",
-        "laptop":       "laptop",
-        "tel\u00e9fono":     "bolso",        # fallback más parecido
+        "autobús":      "automovil",   # no hay MP3 de autobús, usar automóvil
+        "camión":       "automovil",   # no hay MP3 de camión, usar automóvil
+        "banca":        "silla",       # superficie para sentarse — fallback a silla
         "mochila":      "mochila",
+        "paraguas":     "bolso",       # objeto personal — fallback a bolso
         "maleta":       "maleta",
+        "silla":        "silla",
+        "sofá":         "sofa",
+        "cama":         "silla",       # fallback
+        "mesa":         "mesa",
+        "televisión":   "televisor",
+        "laptop":       "laptop",
+        "teléfono":     "bolso",       # fallback más parecido
     }
     prefijo_audio = MAPA_CLASE_AUDIO.get(clase_nombre, clase_nombre)
 
