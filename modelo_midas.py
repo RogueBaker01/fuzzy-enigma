@@ -82,11 +82,17 @@ class MidasDepthEstimator:
         std_dev = np.std(roi)
         roi_bottom_5_percent = depth_map_8bit[int(h * 0.95):h, :]
         mean_bottom = np.mean(roi_bottom_5_percent)
+        # Media de la parte alta del ROI para comparación relativa
+        roi_top_30pct = depth_map_8bit[roi_top:int(h * 0.80), :]
+        mean_top_roi  = float(np.mean(roi_top_30pct)) if roi_top_30pct.size > 0 else 128.0
 
         umbral_std        = 35.0   # Discontinuidad en el plano del suelo
-        umbral_profundidad = 80.0  # Pies apuntando al vacío
+        # Umbral RELATIVO: la parte inferior del suelo es significativamente
+        # más lejana (menor profundidad) que la parte superior del mismo ROI.
+        # Evita el fallo del umbral absoluto 80 que era inalcanzable con norm min/max.
+        caida_relativa = (mean_top_roi - float(mean_bottom)) > 20.0
 
-        peligro_detectado = (std_dev > umbral_std and mean_bottom < umbral_profundidad)
+        peligro_detectado = (std_dev > umbral_std) or caida_relativa
 
         # 5. Detección de Pared/Barrera (heurística MiDaS)
         # Analizamos la banda central del frame (fila 25%–75%) dividida en 3 tercios.

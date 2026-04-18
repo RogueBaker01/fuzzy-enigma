@@ -249,6 +249,28 @@ def obtener_archivo_audio(
     distancia_metros: float,
 ) -> None:
 
+    # 0. Traducir el nombre de clase YOLO al prefijo real del archivo MP3.
+    # Los nombres en CLASES_OBSTACULOS usan tildes/abreviaturas del español,
+    # pero los MP3 pregrabados usan prefijos distintos (sin tildes, nombres completos).
+    MAPA_CLASE_AUDIO = {
+        "persona":      "persona",
+        "bicicleta":    "bicicleta",
+        "coche":        "automovil",
+        "moto":         "motocicleta",
+        "autob\u00fas":       "automovil",   # no hay MP3 de autobús, usar automóvil
+        "cami\u00f3n":       "automovil",   # no hay MP3 de camión, usar automóvil
+        "silla":        "silla",
+        "sof\u00e1":         "sofa",
+        "cama":         "silla",        # fallback
+        "mesa":         "mesa",
+        "televisi\u00f3n":   "televisor",
+        "laptop":       "laptop",
+        "tel\u00e9fono":     "bolso",        # fallback más parecido
+        "mochila":      "mochila",
+        "maleta":       "maleta",
+    }
+    prefijo_audio = MAPA_CLASE_AUDIO.get(clase_nombre, clase_nombre)
+
     # 1. Traducir posición larga a clave de nombre de archivo
     mapa_pos = {
         "a tu izquierda": "izquierda",
@@ -260,10 +282,9 @@ def obtener_archivo_audio(
     # 2. Redondeo Escalón: aproximar distancia al step pregrabado más cercano
     dist_binned = _redondear_escalon(distancia_metros)
 
-    # 3. Construir nombre del archivo (ej. "silla_izquierda_1_0.mp3")
-    # La distancia se formatea como float con 1 decimal y el punto reemplazado por _
+    # 3. Construir nombre del archivo usando el prefijo traducido
     dist_sufijo    = f"{dist_binned:.1f}".replace(".", "_")
-    nombre_archivo = f"{clase_nombre}_{pos_clave}_{dist_sufijo}.mp3"
+    nombre_archivo = f"{prefijo_audio}_{pos_clave}_{dist_sufijo}.mp3"
     ruta_audio     = os.path.join(DIRECTORIO_AUDIO, nombre_archivo)
 
     # 4. Determinar si es alerta crítica (escalones o distancia < 1.0 m)
