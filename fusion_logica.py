@@ -77,9 +77,10 @@ def _audio_existe(ruta: str) -> bool:
 class AudioWorker:
 
     def __init__(self):
-        self._cola: queue.Queue[str | None] = queue.Queue()
+        self._cola: queue.Queue[str | None] = queue.Queue(maxsize=3)
         self._activo = True
         self._lock = threading.Lock()
+        self._interrupcion_activa = threading.Event()
 
         if not pygame.mixer.get_init():
             pygame.mixer.init(frequency=44100, size=-16, channels=1, buffer=512)
@@ -90,9 +91,11 @@ class AudioWorker:
         self._hilo.start()
 
     def encolar(self, archivo: str, es_critico: bool = False):
-        
+
         if es_critico:
             with self._lock:
+                self._interrupcion_activa.set()
+
                 # Vaciar toda la cola existente
                 descartados = 0
                 while not self._cola.empty():
@@ -114,7 +117,16 @@ class AudioWorker:
                 else:
                     print(f"[AUDIO][PREEMPT] Prioridad crítica: {archivo}")
 
-        self._cola.put(archivo)
+        # Si la cola está llena, descartar el audio más antiguo antes de insertar.
+        with self._lock:
+            if self._cola.full():
+                try:
+                    self._cola.get_nowait()
+                    self._cola.task_done()
+                    print(f"[AUDIO][DROP] Cola llena → descartado audio antiguo para insertar: {archivo}")
+                except queue.Empty:
+                    pass
+            self._cola.put_nowait(archivo)
 
     def detener(self):
         self._activo = False
@@ -139,10 +151,14 @@ class AudioWorker:
                         self._cola.task_done()
                         continue
 
+                # el nuevo audio, para no abortar inmediatamente su propia reproducción.
+                self._interrupcion_activa.clear()
                 pygame.mixer.music.load(archivo)
                 pygame.mixer.music.play()
 
                 while pygame.mixer.music.get_busy():
+                    if self._interrupcion_activa.is_set():
+                        break
                     time.sleep(0.05)
 
             except Exception as e:
