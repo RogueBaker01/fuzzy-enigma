@@ -333,16 +333,6 @@ iris/
 
 ---
 
-## Equipo
-
-<!-- Agrega los miembros del equipo aquí -->
-
-| Nombre | Rol | Contacto |
-|--------|-----|----------|
-| TBD | Desarrollo principal | — |
-
----
-
 ## Licencia
 
 Este proyecto está licenciado bajo la [Licencia MIT](LICENSE).
