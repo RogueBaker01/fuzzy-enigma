@@ -6,12 +6,14 @@ import time
 # ──────────────────────────────────────────────────────────────────────────────
 # Umbrales de detección de desnivel
 # ──────────────────────────────────────────────────────────────────────────────
-# Salto mínimo en el mapa normalizado (0-255) para considerar un borde de escalón
-UMBRAL_GRAD_DESNIVEL   = 18.0
-# Std mínima del ROI inferior que activa la señal secundaria de desnivel
-UMBRAL_STD_DESNIVEL    = 22.0
-# Fracción del ancho del frame que debe presentar el salto de forma simultánea
-UMBRAL_COLS_ANCHO      = 0.35  # 35 %
+# Salto mínimo en el mapa normalizado (0-255) para considerar un borde de escalón.
+# Valor alto = menos sensible al ruido de textura. Un escalón real produce saltos
+# de 40-80 unidades en el mapa normalizado por percentiles.
+UMBRAL_GRAD_DESNIVEL   = 28.0
+
+# Fracción del ancho del frame que debe presentar el salto de forma simultánea.
+# 50% = al menos la mitad del ancho debe tener el borde → filtra ruido disperso.
+UMBRAL_COLS_ANCHO      = 0.50  # 50 %
 
 # Umbrales de detección de pared
 UMBRAL_MEDIA_PARED     = 150.0   # Superficie muy cercana (bajado de 175 → 150)
@@ -120,17 +122,16 @@ class MidasDepthEstimator:
         Un escalón real crea una LÍNEA HORIZONTAL de discontinuidad de profundidad:
         muchas columnas presentan un salto brusco a la *misma* altura de forma
         simultánea.  El ruido de textura o cámara genera saltos DISPERSOS que
-        no llegan a cubrir el 35% del ancho del frame.
+        no llegan a cubrir el 50%  del ancho del frame.
 
-        Condición OR (en vez del antiguo AND imposible):
-            - señal_principal : borde horizontal continuo (gradiente)
-            - señal_secundaria: alta varianza global del ROI inferior (respaldo)
+        Solo se usa la señal de gradiente (NO std como señal secundaria).
+        La std de cualquier escena real supera 22, lo que causaba que la
+        condición OR disparara peligro=True constantemente.
         """
-        # ROI: franja 40%–95% de la altura.
-        # - Inferior al 95% para evitar el borde de la cámara.
-        # - Superior al 40% para capturar la nariz del escalón aunque la
-        #   cámara esté alta.
-        r0 = int(h * 0.40)
+        # ROI: franja 50%–95% de la altura.
+        # Comienza en el 50% para excluir el fondo y objetos lejanos,
+        # y quedarnos con la zona de suelo relevante donde aparecerían escalones.
+        r0 = int(h * 0.50)
         r1 = int(h * 0.95)
         roi = depth_map_8bit[r0:r1, :].astype(np.float32)
 
@@ -140,17 +141,12 @@ class MidasDepthEstimator:
         # Gradiente vertical por columna: diferencia entre filas consecutivas
         grad_vertical = np.abs(np.diff(roi, axis=0))  # shape (r1-r0-1, w)
 
-        # Número de columnas con salto > umbral en cada fila
+        # Número de columnas con salto > umbral en CADA FILA
         cols_con_salto = np.sum(grad_vertical > UMBRAL_GRAD_DESNIVEL, axis=1)
         max_cols_afectadas = int(np.max(cols_con_salto))
 
-        # Señal principal: borde horizontal que cubre ≥35% del ancho
-        hay_borde_horizontal = max_cols_afectadas >= (w * UMBRAL_COLS_ANCHO)
-
-        # Señal secundaria: alta varianza en ROI (umbral bajado 35→22)
-        hay_varianza_alta = float(np.std(roi)) > UMBRAL_STD_DESNIVEL
-
-        return hay_borde_horizontal or hay_varianza_alta
+        # Un escalón → borde horizontal que cubre ≥50% del ancho del frame
+        return max_cols_afectadas >= int(w * UMBRAL_COLS_ANCHO)
 
     # ──────────────────────────────────────────────────────────────────────────
     # Detector de paredes / barreras (mejorado)

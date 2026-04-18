@@ -44,11 +44,12 @@ DIRECTORIO_AUDIO = "audios"
 ESCALONES_DISTANCIA = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
 
 # Tiempo máximo (segundos) que un audio puede esperar en cola antes de descartarse.
-# Evita reproducir alertas de objetos que ya pasaron mientras se avanzaba.
-MAX_EDAD_AUDIO_SEG = 1.5
+# Debe ser mayor que la duración máxima de un clip TTS (~2-3s) para no descartar
+# items que simplemente están esperando su turno.
+# Descarta items verdaderamente obsoletos (ya pasó mucho tiempo desde el evento).
+MAX_EDAD_AUDIO_SEG = 6.0
 
 # Distancia (metros) por debajo de la cual se activa el beep de proximidad.
-# Es independiente de los MP3 pregrabados y se genera directamente por pygame.
 UMBRAL_DISTANCIA_BEEP = 0.8
 
 # Caché de archivos de audio en memoria
@@ -85,32 +86,19 @@ class AudioWorker:
 
     def __init__(self):
         # La cola almacena tuplas (archivo: str | None, encolado_en: float)
-        # El worker descarta items con más de MAX_EDAD_AUDIO_SEG segundos de espera,
-        # evitando reproducir alertas de objetos que ya pasaron.
         self._cola: queue.Queue = queue.Queue(maxsize=3)
         self._activo = True
         self._lock = threading.Lock()
         self._interrupcion_activa = threading.Event()
 
         if not pygame.mixer.get_init():
-            # Mantener channels=1 (mono) para máxima compatibilidad con los MP3 pregrabados
-            # y con versiones anteriores de pygame que no soportan bien SDARS estéreo.
             pygame.mixer.init(frequency=44100, size=-16, channels=1, buffer=512)
 
-        # Canal dedicado para beeps de proximidad (no pasa por la cola de MP3)
-        pygame.mixer.set_num_channels(4)
-        self._canal_beep = pygame.mixer.Channel(1)
-
-        # Pre-generar tonos de beep. Se envuelve en try/except para que un
-        # fallo aquí (p.ej. pygame ya inicializado con otra configuración)
-        # NO rompa el AudioWorker ni deje sin audio el resto del sistema.
-        try:
-            self._beep_normal  = self._generar_tono(freq_hz=880,  duracion_ms=120, volumen=0.7)
-            self._beep_urgente = self._generar_tono(freq_hz=1320, duracion_ms=80,  volumen=0.9)
-        except Exception as e:
-            print(f"[AudioWorker] Beep sintético no disponible: {e}. MP3 siguen funcionando.")
-            self._beep_normal  = None
-            self._beep_urgente = None
+        # Los beeps se generan de forma lazy la primera vez que se necesitan.
+        # Esto evita que un fallo de sndarray en __init__ bloquee todo el sistema.
+        self._beep_normal:  "pygame.mixer.Sound | None" = None
+        self._beep_urgente: "pygame.mixer.Sound | None" = None
+        self._beep_listo = False   # Flag: ya se intentó generar (aunque haya fallado)
 
         self._hilo = threading.Thread(
             target=self._loop_audio, daemon=True, name="AudioWorker"
@@ -160,17 +148,25 @@ class AudioWorker:
             self._cola.put_nowait((archivo, ahora))
 
     def beep_proximidad(self, urgente: bool = False):
-        """Reproduce un beep de alerta de proximidad instantaneamente.
-        No pasa por la cola: es imperceptiblemente rápido y nunca queda obsoleto.
-        urgente=True  → tono más agudo y breve (objeto a <0.5 m)
-        urgente=False → tono estándar (objeto a 0.5–0.8 m)
-        """
+        """Reproduce un beep de alerta de proximidad (lazy: se genera al primer uso)."""
+        # Generar tonos la primera vez que se necesitan, no en __init__
+        if not self._beep_listo:
+            self._beep_listo = True
+            try:
+                self._beep_normal  = self._generar_tono(freq_hz=880,  duracion_ms=120, volumen=0.7)
+                self._beep_urgente = self._generar_tono(freq_hz=1320, duracion_ms=80,  volumen=0.9)
+            except Exception as e:
+                print(f"[AudioWorker] Beep sintético no disponible: {e}")
+
         sonido = self._beep_urgente if urgente else self._beep_normal
         if sonido is None:
-            return   # Beep descartado (fallo en generación, MP3 siguen OK)
-        if self._canal_beep.get_busy():
-            return   # Ya suena un beep, no apilar
-        self._canal_beep.play(sonido)
+            return
+        try:
+            canal = pygame.mixer.find_channel()
+            if canal and not canal.get_busy():
+                canal.play(sonido)
+        except Exception:
+            pass   # El beep es opcional, nunca bloquear por él
 
     def detener(self):
         self._activo = False
