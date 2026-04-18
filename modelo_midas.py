@@ -90,9 +90,21 @@ class MidasDepthEstimator:
         # tienen discontinuidades de >10 px y sobreviven al blur.
         depth_map_8bit = cv2.GaussianBlur(depth_map_8bit, (5, 5), 0)
 
-        # 4. Lógica de Detección de Peligro (Escaleras/Precipicio hacia abajo)
-        # ROI inferior: el 30% más bajo del frame
+        # 4. Detección de Pared/Barrera — se ejecuta PRIMERO porque su resultado
+        #    suprime los falsos positivos de escalón causados por la unión pared-suelo.
+        #
+        #    Física del problema:
+        #      - La banda de pared cubre las filas 25%–75%.
+        #      - La ROI de escalón cubre las filas 70%–100%.
+        #      - El borde inferior de una pared (unión pared↔suelo) cae en esa zona
+        #        compartida (70%–75%) y crea exactamente el gradiente brusco de
+        #        profundidad que dispara std_dev y caida_relativa.
+        #      - Detectar la pared primero nos permite suprimir esa ambigüedad.
         h, w = depth_map_8bit.shape
+        pared_zona = self._detectar_pared(depth_map_8bit, h, w)
+
+        # 5. Detección de Peligro de Suelo (Escaleras/Precipicio)
+        # ROI inferior: el 30% más bajo del frame
         roi_top = int(h * 0.7)
         roi = depth_map_8bit[roi_top:h, :]
 
@@ -107,19 +119,16 @@ class MidasDepthEstimator:
         roi_top_30pct = depth_map_8bit[roi_top:int(h * 0.80), :]
         mean_top_roi  = float(np.mean(roi_top_30pct)) if roi_top_30pct.size > 0 else 128.0
 
-        umbral_std        = 60.0   # Discontinuidad en el plano del suelo (subido para reducir FP en pisos brillantes)
-        # Umbral RELATIVO: la parte inferior del suelo es significativamente
-        # más lejana (menor profundidad) que la parte superior del mismo ROI.
-        # Evita el fallo del umbral absoluto 80 que era inalcanzable con norm min/max.
+        umbral_std   = 60.0   # Discontinuidad real de suelo (subido para reducir FP en pisos brillantes)
         caida_relativa = (mean_top_roi - float(mean_bottom)) > 20.0
 
-        peligro_detectado = (std_dev > umbral_std) or caida_relativa
-
-        # 5. Detección de Pared/Barrera (heurística MiDaS)
-        # Analizamos la banda central del frame (fila 25%–75%) dividida en 3 tercios.
-        # Si una zona tiene media alta (superficie cercana) Y std baja (superficie plana
-        # y uniforme), es casi con certeza una pared, puerta o barrera.
-        pared_zona = self._detectar_pared(depth_map_8bit, h, w)
+        # SUPRESIÓN: si hay una pared al frente, su unión con el suelo genera
+        # std_dev y caida_relativa altos de forma espuria. En ese caso la amenaza
+        # real ya está cubierta por pared_zona → no emitir falsa alerta de escalón.
+        if pared_zona == "frente":
+            peligro_detectado = False
+        else:
+            peligro_detectado = (std_dev > umbral_std) or caida_relativa
 
         return depth_map_8bit, peligro_detectado, pared_zona
 
@@ -145,11 +154,14 @@ class MidasDepthEstimator:
             "derecha":   banda[:, 2*t:],
         }
 
-        # Umbrales calibrados en MVP:
-        #   UMBRAL_MEDIA: la zona debe estar muy cerca del lente (valor alto = cercano en MiDaS invertido)
-        #   UMBRAL_STD:   la zona debe ser muy plana (pared lisa), no un objeto rugoso o escena mixta
-        UMBRAL_MEDIA = 170.0   # Superficie muy cercana
-        UMBRAL_STD   = 15.0    # Superficie plana/uniforme (pared, no objeto rugoso)
+        # Umbrales calibrados post-MVP:
+        #   UMBRAL_MEDIA = 145 → detecta paredes a distancia media-cercana.
+        #     Con normalización min-max, una pared a ~1–1.5 m suele quedar en 130–160.
+        #     Bajar de 170 evita el problema de "solo de muy cerca".
+        #   UMBRAL_STD = 25 → acepta paredes con textura real (ladrillo, yeso rugoso).
+        #     15 era tan estricto que solo detectaba superficies casi perfectamente lisas.
+        UMBRAL_MEDIA = 145.0
+        UMBRAL_STD   = 25.0
 
         candidatos = {}  # zona → media de profundidad
         for nombre, roi in zonas.items():
