@@ -77,7 +77,8 @@ def _iniciar_ws_receiver() -> None:
     t.start()
 
 
-def resolver_fuente_video(modo: str):
+def resolver_fuente_video(args):
+    modo = args.fuente
 
     if modo == "webcam":
         print("[FUENTE] Modo: Cámara web local (dispositivo 0)")
@@ -147,7 +148,7 @@ def main():
     monitor_mov = MonitorMovimiento()
 
     # 3. Fuente de video (seleccionada por CLI)
-    src, etiqueta_fuente = resolver_fuente_video(args.fuente)
+    src, etiqueta_fuente = resolver_fuente_video(args)
 
     # Rama WebSocket: servidor integrado compatible con servidor.py 
     if args.fuente == "websocket":
