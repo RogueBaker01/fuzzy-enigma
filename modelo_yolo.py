@@ -47,10 +47,11 @@ class YoloDetector:
 
         self.model = YOLO(model_path)
 
-        # FP16 para reducir consumo de VRAM a la mitad
+        # FP16 se activa en predict() via half=True — NO llamar .half() aquí manualmente.
+        # Llamarlo antes de la primera inferencia rompe la fusión interna de capas de YOLO
+        # (fuse_conv_and_bn lanza RuntimeError: Half != float).
         if self.device.type == "cuda":
             self.model.to(self.device)
-            self.model.model.half()
 
         self.conf = conf
         self.clases_ids = list(CLASES_OBSTACULOS.keys())
