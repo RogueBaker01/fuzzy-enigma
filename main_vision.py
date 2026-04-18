@@ -8,6 +8,7 @@ import cv2
 import time
 import numpy as np
 import pygame
+import websockets
 
 from modelo_midas  import MidasDepthEstimator
 from modelo_yolo   import YoloDetector, nombrar_objetos
@@ -21,25 +22,22 @@ from fusion_logica import (
     posicion_en_frame,
     construir_alerta,
     obtener_archivo_audio,
+    inicializar_cache_audio,
     UMBRAL_AREA_RELEVANTE,
     DIRECTORIO_AUDIO,
 )
 
-# URL del stream RTSP/HTTP del teléfono (modo legacy con cap.VideoCapture).
-# Aplicaciones compatibles: DroidCam, IP Webcam (Android) | EpocCam (iOS)
-FUENTE_TELEFONO_URL = "http://[IP_ADDRESS]/video"  # <-- cambia la IP
+# URL del stream RTSP/HTTP del teléfono
 
-# Configuración del servidor WebSocket (modo websocket).
-# Usa el mismo puerto que servidor.py para ser compatible.
-# El teléfono debe conectarse a: ws://<IP_DE_ESTA_PC>:8081
-# y enviar cada frame como un paquete binario JPEG.
+FUENTE_TELEFONO_URL = "http://[IP_ADDRESS]/video"
+
+# Configuración del servidor WebSocket
 WS_PUERTO   = 8081
-_frame_queue: queue.Queue = queue.Queue(maxsize=2)  # Buffer de frames WS
+_frame_queue: queue.Queue = queue.Queue(maxsize=2)
 
 
 def _iniciar_ws_receiver() -> None:
 
-    import websockets  # import local para no forzar la dep en modos que no la usan
 
     async def _handler(websocket):
         ip = websocket.remote_address[0]
@@ -48,7 +46,7 @@ def _iniciar_ws_receiver() -> None:
             async for mensaje in websocket:
                 if not isinstance(mensaje, bytes):
                     continue
-                # Decodificar JPEG → array BGR (mismo formato que cap.read())
+                # Decodificar JPEG → array BGR
                 buffer = np.frombuffer(mensaje, dtype=np.uint8)
                 frame  = cv2.imdecode(buffer, cv2.IMREAD_COLOR)
                 if frame is None:
@@ -67,7 +65,7 @@ def _iniciar_ws_receiver() -> None:
         async with websockets.serve(_handler, "0.0.0.0", WS_PUERTO):
             print(f"[WS] Servidor escuchando en ws://0.0.0.0:{WS_PUERTO}")
             print(f"[WS] Conecta el teléfono a: ws://<IP_DE_ESTA_PC>:{WS_PUERTO}")
-            await asyncio.Future()  # Corre hasta que el proceso termine
+            await asyncio.Future()
 
     def _thread():
         loop = asyncio.new_event_loop()
@@ -136,6 +134,7 @@ def main():
 
     # 2. Iniciar módulo de audio y cooldowns
     print("[3/3] Iniciando AudioWorker (MP3 locales)...")
+    inicializar_cache_audio()  # Caché O(1) — lee audios/ una sola vez
     audio       = AudioWorker()
     cooldown    = GestorCooldown()
     monitor     = MonitorSaludCamara()
@@ -234,7 +233,7 @@ def main():
                             (12, roi_top + 29), cv2.FONT_HERSHEY_SIMPLEX,
                             0.6, C_PELIGRO, 2, cv2.LINE_AA)
                 if cooldown.puede_alertar(-1):
-                    audio.encolar(os.path.join(DIRECTORIO_AUDIO, "escalon_frente.mp3"))
+                    audio.encolar(os.path.join(DIRECTORIO_AUDIO, "escalon_frente.mp3"), es_critico=True)
                     cooldown.registrar(-1)
 
             cv2.line(frame, (tercio, 0), (tercio, alto), C_TERCIOS, 2)
@@ -280,21 +279,21 @@ def main():
         print("Sistema cerrado correctamente.")
         return   # Salir limpiamente sin pasar por la rama cap
 
-    # --- Rama cap (archivo / webcam / telefono RTSP) ---
+    # Rama cap (archivo / webcam / telefono RTSP)
     cap = cv2.VideoCapture(src)
 
     if not cap.isOpened():
         print(f"[ERROR] No se puede abrir la fuente de video: '{src}'")
         if args.fuente == "telefono":
             print("[AYUDA] Asegúrate de que:")
-            print(f"         1. El teléfono y la PC estén en la misma red Wi-Fi")
-            print(f"         2. La app de streaming esté corriendo en el teléfono")
-            print(f"         3. La IP en FUENTE_TELEFONO_URL sea correcta: {FUENTE_TELEFONO_URL}")
+            print("1. El teléfono y la PC estén en la misma red Wi-Fi")
+            print("2. La app de streaming esté corriendo en el teléfono")
+            print(f"3. La IP en FUENTE_TELEFONO_URL sea correcta: {FUENTE_TELEFONO_URL}")
         audio.detener()
         return
 
     print(f"\n[OK] Sistema listo. Fuente activa: {etiqueta_fuente}")
-    print("     Controles: [Q] Salir  |  [D] Describir entorno\n")
+    print("Controles: [Q] Salir  |  [D] Describir entorno\n")
 
     # Paleta de colores (BGR)
     C_TERCIOS = (0, 230, 60)
@@ -392,7 +391,7 @@ def main():
                         (12, roi_top + 29), cv2.FONT_HERSHEY_SIMPLEX,
                         0.6, C_PELIGRO, 2, cv2.LINE_AA)
             if cooldown.puede_alertar(-1):
-                audio.encolar(os.path.join(DIRECTORIO_AUDIO, "escalon_frente.mp3"))
+                audio.encolar(os.path.join(DIRECTORIO_AUDIO, "escalon_frente.mp3"), es_critico=True)
                 cooldown.registrar(-1)
 
         # 5: Overlay de tercios, FPS y etiqueta de fuente
@@ -439,7 +438,6 @@ def main():
             # Descripción solo en consola — no hay MP3 dinámico pregrabado
             print(f"Descripción: '{descripcion}'\n")
 
-    print("\nCerrando sistema...")
     audio.detener()
     cap.release()
     cv2.destroyAllWindows()

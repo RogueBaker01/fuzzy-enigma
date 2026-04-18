@@ -37,16 +37,39 @@ COOLDOWN_ALERTA_SEG = 4.0
 UMBRAL_AREA_RELEVANTE = 0.03
 
 # Directorio donde están los MP3 pregrabados generados por generador_audios.py.
-# Estructura esperada:
-#   audios/silla_izquierda_1_0.mp3
-#   audios/persona_frente_0_5.mp3
-#   audios/escalon_frente.mp3  ...
+
 DIRECTORIO_AUDIO = "audios"
 
-# Escalones de distancia disponibles (deben coincidir exactamente con los
-# generados por generador_audios.py). Si MiDaS da un valor intermedio,
+# Escalones de distancia disponibles, si MiDaS da un valor intermedio,
 # obtener_archivo_audio() lo aproximará al escalón más cercano.
 ESCALONES_DISTANCIA = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
+
+# Caché de archivos de audio en memoria
+ARCHIVOS_AUDIO_DISPONIBLES: set[str] = set()
+
+def inicializar_cache_audio(directorio: str = DIRECTORIO_AUDIO) -> None:
+
+    global ARCHIVOS_AUDIO_DISPONIBLES
+    ARCHIVOS_AUDIO_DISPONIBLES.clear()
+
+    if not os.path.isdir(directorio):
+        print(f"[CACHE] Directorio '{directorio}' no encontrado. Cache vacío.")
+        return
+
+    for nombre in os.listdir(directorio):
+        ruta_completa = os.path.join(directorio, nombre)
+        if os.path.isfile(ruta_completa):
+            # Guardamos la ruta completa relativa
+            ARCHIVOS_AUDIO_DISPONIBLES.add(ruta_completa)
+
+    print(f"[CACHE] {len(ARCHIVOS_AUDIO_DISPONIBLES)} archivos de audio cacheados.")
+
+
+def _audio_existe(ruta: str) -> bool:
+
+    if ARCHIVOS_AUDIO_DISPONIBLES:
+        return ruta in ARCHIVOS_AUDIO_DISPONIBLES
+    return os.path.exists(ruta)  # Fallback seguro
 
 
 # AudioWorker: cola asíncrona de archivo MP3 → pygame
@@ -56,18 +79,41 @@ class AudioWorker:
     def __init__(self):
         self._cola: queue.Queue[str | None] = queue.Queue()
         self._activo = True
+        self._lock = threading.Lock()
 
         if not pygame.mixer.get_init():
             pygame.mixer.init(frequency=44100, size=-16, channels=1, buffer=512)
-
-        print("[AudioWorker] Modo: MP3 locales desde '{}'/".format(DIRECTORIO_AUDIO))
 
         self._hilo = threading.Thread(
             target=self._loop_audio, daemon=True, name="AudioWorker"
         )
         self._hilo.start()
 
-    def encolar(self, archivo: str):
+    def encolar(self, archivo: str, es_critico: bool = False):
+        
+        if es_critico:
+            with self._lock:
+                # Vaciar toda la cola existente
+                descartados = 0
+                while not self._cola.empty():
+                    try:
+                        self._cola.get_nowait()
+                        self._cola.task_done()
+                        descartados += 1
+                    except queue.Empty:
+                        break
+
+                # Detener audio en curso
+                try:
+                    pygame.mixer.music.stop()
+                except Exception:
+                    pass
+
+                if descartados:
+                    print(f"[AUDIO][PREEMPT]  {descartados} alertas descartadas → prioridad: {archivo}")
+                else:
+                    print(f"[AUDIO][PREEMPT] Prioridad crítica: {archivo}")
+
         self._cola.put(archivo)
 
     def detener(self):
@@ -84,10 +130,10 @@ class AudioWorker:
             print(f"[AUDIO] >> {archivo}")
 
             try:
-                if not os.path.exists(archivo):
+                if not _audio_existe(archivo):
                     # Archivo no grabado → bip genérico si existe, si no silencio
                     bip = os.path.join(DIRECTORIO_AUDIO, "beep.mp3")
-                    if os.path.exists(bip):
+                    if _audio_existe(bip):
                         archivo = bip
                     else:
                         self._cola.task_done()
@@ -204,20 +250,23 @@ def obtener_archivo_audio(
     nombre_archivo = f"{clase_nombre}_{pos_clave}_{dist_sufijo}.mp3"
     ruta_audio     = os.path.join(DIRECTORIO_AUDIO, nombre_archivo)
 
-    # 4. Verificar existencia y encolar
-    if os.path.exists(ruta_audio):
+    # 4. Determinar si es alerta crítica (escalones o distancia < 1.0 m)
+    es_critico = ("escalon" in clase_nombre.lower()) or (distancia_metros < 1.0)
+
+    # 5. Verificar existencia (O(1) con caché) y encolar
+    if _audio_existe(ruta_audio):
         # Caso normal: archivo pregrabado encontrado → reproducir
-        audio_worker.encolar(ruta_audio)
+        audio_worker.encolar(ruta_audio, es_critico=es_critico)
 
     else:
-        # 5. Fallback: beep genérico si el MP3 específico no existe
+        # 6. Fallback: beep genérico si el MP3 específico no existe
         print(
             f"[AUDIO][WARN] Archivo no encontrado: '{ruta_audio}'. "
             f"Ejecuta generador_audios.py para generarlo."
         )
         ruta_beep = os.path.join(DIRECTORIO_AUDIO, "beep.mp3")
-        if os.path.exists(ruta_beep):
-            audio_worker.encolar(ruta_beep)
+        if _audio_existe(ruta_beep):
+            audio_worker.encolar(ruta_beep, es_critico=es_critico)
         # Si tampoco existe el beep → silencio total (pass implícito)
 
 
