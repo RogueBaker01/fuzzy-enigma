@@ -311,13 +311,26 @@ def main():
     C_TEXTO   = (255, 255, 255)
     C_BG      = (15, 15, 15)
 
-    t_fps = time.time()
+    t_fps         = time.time()
+    n_frame       = 0      # Contador de frames para el throttle de MiDaS
+    depth_map     = None   # Caché del último mapa de profundidad calculado
+    peligro_suelo = False
+    pared_zona    = None
+    MIDAS_CADA_N  = 3      # Ejecutar MiDaS 1 de cada N frames (ajusta según FPS)
+    ESCALA_INF    = 0.5    # Escalar frame al 50% antes de inferencia MiDaS
 
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
             break
 
+        # --- Rotación para cámaras IP de teléfono en modo vertical ---
+        # Los teléfonos en portrait envían el frame rotado 90°; OpenCV no lee esa metadata.
+        # Cambia ROTATE_90_CLOCKWISE → ROTATE_90_COUNTERCLOCKWISE si se ve al revés.
+        if args.fuente == "camara_ip":
+            frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+
+        n_frame += 1
         alto, ancho = frame.shape[:2]
         tercio      = ancho // 3
 
@@ -338,8 +351,13 @@ def main():
         conteo_cen: dict = {}
         conteo_der: dict = {}
 
-        # 1: MiDaS → mapa de profundidad + detección de peligro en el suelo
-        depth_map, peligro_suelo, pared_zona = midas.estimate_depth_and_danger(frame)
+        # 1: MiDaS → mapa de profundidad (solo cada MIDAS_CADA_N frames para ahorrar GPU)
+        if n_frame % MIDAS_CADA_N == 0 or depth_map is None:
+            # Reducir resolución de entrada acelera MiDaS sin afectar la calidad de alerta
+            frame_pequeño = cv2.resize(frame, (0, 0), fx=ESCALA_INF, fy=ESCALA_INF)
+            depth_small, peligro_suelo, pared_zona = midas.estimate_depth_and_danger(frame_pequeño)
+            # Escalar el mapa de vuelta al tamaño original para la fusión con YOLO
+            depth_map = cv2.resize(depth_small, (ancho, alto), interpolation=cv2.INTER_LINEAR)
 
         # 2: YOLO → detección de obstáculos con FP16
         resultado = yolo.detectar(frame)
