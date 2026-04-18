@@ -3,100 +3,158 @@ import torch
 import numpy as np
 import time
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Umbrales de detección de desnivel
+# ──────────────────────────────────────────────────────────────────────────────
+# Salto mínimo en el mapa normalizado (0-255) para considerar un borde de escalón
+UMBRAL_GRAD_DESNIVEL   = 18.0
+# Std mínima del ROI inferior que activa la señal secundaria de desnivel
+UMBRAL_STD_DESNIVEL    = 22.0
+# Fracción del ancho del frame que debe presentar el salto de forma simultánea
+UMBRAL_COLS_ANCHO      = 0.35  # 35 %
+
+# Umbrales de detección de pared
+UMBRAL_MEDIA_PARED     = 150.0   # Superficie muy cercana (bajado de 175 → 150)
+UMBRAL_STD_PARED       = 30.0    # Superficie plana/uniforme
+UMBRAL_GRAD_HORIZ_PARED= 12.0    # Gradiente horizontal bajo = superficie lisa
+
+
 class MidasDepthEstimator:
     def __init__(self):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print(f"Iniciando MiDaS en el dispositivo: {self.device}")
-        
-        # Cargar el modelo MiDaS_small (el más ligero y rápido de la familia MiDaS)
+        print(f"[MiDaS] Iniciando en el dispositivo: {self.device}")
+
         model_type = "MiDaS_small"
-        
-        # Cargar el modelo desde torch.hub
-        self.midas = torch.hub.load("intel-isl/MiDaS", model_type)
-        
-        # Mover a GPU de inmediato y convertir a precisión media (FP16)
-        # Esto reduce el consumo de memoria a la mitad y acelera la inferencia
+
+        # Cargar modelo con manejo de errores de red/disco
+        try:
+            self.midas = torch.hub.load("intel-isl/MiDaS", model_type)
+        except Exception as e:
+            raise RuntimeError(
+                f"[MiDaS] No se pudo cargar el modelo '{model_type}'. "
+                f"Verifica tu conexión a internet o la caché local de torch.hub.\n"
+                f"Error original: {e}"
+            ) from e
+
         self.midas.to(self.device)
-        if self.device.type == 'cuda':
+        if self.device.type == "cuda":
             self.midas.half()
-            
         self.midas.eval()
-        
-        # Cargar las transformaciones específicas para MiDaS_small
-        midas_transforms = torch.hub.load("intel-isl/MiDaS", "transforms")
+
+        # Transformaciones nativas de MiDaS_small
+        try:
+            midas_transforms = torch.hub.load("intel-isl/MiDaS", "transforms")
+        except Exception as e:
+            raise RuntimeError(
+                f"[MiDaS] No se pudieron cargar las transformaciones. Error: {e}"
+            ) from e
         self.transform = midas_transforms.small_transform
 
-    @torch.no_grad() # Desactivar el cálculo de gradientes es CRÍTICO para inferencia rápida
-    def estimate_depth_and_danger(self, frame):
+        # ── Warm-up: primera inferencia dummy para JIT-compilar el modelo
+        # Elimina el spike de ~800 ms en el primer frame real del pipeline.
+        print("[MiDaS] Ejecutando warm-up...")
+        dummy = torch.zeros(1, 3, 256, 256).to(self.device)
+        if self.device.type == "cuda":
+            dummy = dummy.half()
+        with torch.no_grad():
+            self.midas(dummy)
+        print("[MiDaS] Warm-up completado. Listo para inferencia.")
 
-        # 1. Preparar la imagen
-        # OpenCV captura en formato BGR por defecto, MiDaS necesita RGB
+    # ──────────────────────────────────────────────────────────────────────────
+    # Inferencia principal
+    # ──────────────────────────────────────────────────────────────────────────
+
+    @torch.no_grad()
+    def estimate_depth_and_danger(self, frame):
+        """
+        Retorna:
+            depth_map_8bit  (np.ndarray uint8)  — mapa de profundidad normalizado
+            peligro_suelo   (bool)              — desnivel/escalón detectado
+            pared_zona      (str | None)        — zona con pared/barrera
+        """
+        # 1. Preparar imagen para MiDaS
         img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        
-        # Aplicar las transformaciones nativas y mover el tensor a la GPU
         input_batch = self.transform(img_rgb).to(self.device)
-        
-        # Convertir el tensor de entrada a FP16 para igualar los pesos del modelo
-        if self.device.type == 'cuda':
+        if self.device.type == "cuda":
             input_batch = input_batch.half()
-            
-        # 2. Inferencia con el modelo MiDaS
+
+        # 2. Inferencia
         prediction = self.midas(input_batch)
-        
-        # Interpolar la predicción al tamaño original de la imagen
-        # MiDaS devuelve una resolución menor; la escalamos con interpolación bicúbica
+
+        # Interpolar al tamaño original con interpolación bicúbica
         prediction = torch.nn.functional.interpolate(
             prediction.unsqueeze(1),
             size=img_rgb.shape[:2],
             mode="bicubic",
             align_corners=False,
         ).squeeze()
-        
-        # Mover el tensor de resultado vuelta a la CPU y convertirlo a un array de NumPy
+
         depth_map = prediction.cpu().numpy()
-        
-        # 3. Escalar y normalizar a 8-bit (0-255)
-        # Para que sea fácil de visualizar con mapas de calor de OpenCV
-        depth_min = depth_map.min()
-        depth_max = depth_map.max()
-        
-        # Prevención contra división por cero
-        if depth_max - depth_min > 0:
-            depth_map_normalized = (depth_map - depth_min) / (depth_max - depth_min)
-        else:
-            depth_map_normalized = np.zeros_like(depth_map)
-            
-        # Escalar a valores uint8
-        depth_map_8bit = (depth_map_normalized * 255.0).astype(np.uint8)
-        
-        # 4. Lógica de Detección de Peligro (Escaleras/Precipicio hacia abajo)
-        # ROI inferior: el 30% más bajo del frame
+
+        # 3. Normalización robusta con percentiles P2–P98
+        # Descarta outliers (píxeles saturados, cielo, reflejos) para que
+        # el contraste real del escalón ocupe todo el rango 0-255.
+        p2  = np.percentile(depth_map, 2)
+        p98 = np.percentile(depth_map, 98)
+        depth_norm = np.clip((depth_map - p2) / (p98 - p2 + 1e-6), 0.0, 1.0)
+        depth_map_8bit = (depth_norm * 255.0).astype(np.uint8)
+
+        # 4. Detección de peligro en el suelo (escalones / desniveles)
         h, w = depth_map_8bit.shape
-        roi_top = int(h * 0.7)
-        roi = depth_map_8bit[roi_top:h, :]
+        peligro_suelo = self._detectar_desnivel(depth_map_8bit, h, w)
 
-        # Valores ALTOS (cercanos a 255) = CERCANO al lente.
-        # Valores BAJOS (cercanos a 0) = LEJANO al lente o sin obstáculo.
-        # Alta std en el ROI inferior = discontinuidad/escalón.
-        # Media baja en el 5% inferior = vacío/caída.
-        std_dev = np.std(roi)
-        roi_bottom_5_percent = depth_map_8bit[int(h * 0.95):h, :]
-        mean_bottom = np.mean(roi_bottom_5_percent)
-
-        umbral_std        = 35.0   # Discontinuidad en el plano del suelo
-        umbral_profundidad = 80.0  # Pies apuntando al vacío
-
-        peligro_detectado = (std_dev > umbral_std and mean_bottom < umbral_profundidad)
-
-        # 5. Detección de Pared/Barrera (heurística MiDaS)
-        # Analizamos la banda central del frame (fila 25%–75%) dividida en 3 tercios.
-        # Si una zona tiene media alta (superficie cercana) Y std baja (superficie plana
-        # y uniforme), es casi con certeza una pared, puerta o barrera.
+        # 5. Detección de pared / barrera
         pared_zona = self._detectar_pared(depth_map_8bit, h, w)
 
-        return depth_map_8bit, peligro_detectado, pared_zona
+        return depth_map_8bit, peligro_suelo, pared_zona
 
-    # Helpers 
+    # ──────────────────────────────────────────────────────────────────────────
+    # Detector de desniveles (reescrito)
+    # ──────────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _detectar_desnivel(depth_map_8bit: np.ndarray, h: int, w: int) -> bool:
+        """
+        Detecta escalones y desniveles usando gradiente vertical por columnas.
+
+        Un escalón real crea una LÍNEA HORIZONTAL de discontinuidad de profundidad:
+        muchas columnas presentan un salto brusco a la *misma* altura de forma
+        simultánea.  El ruido de textura o cámara genera saltos DISPERSOS que
+        no llegan a cubrir el 35% del ancho del frame.
+
+        Condición OR (en vez del antiguo AND imposible):
+            - señal_principal : borde horizontal continuo (gradiente)
+            - señal_secundaria: alta varianza global del ROI inferior (respaldo)
+        """
+        # ROI: franja 40%–95% de la altura.
+        # - Inferior al 95% para evitar el borde de la cámara.
+        # - Superior al 40% para capturar la nariz del escalón aunque la
+        #   cámara esté alta.
+        r0 = int(h * 0.40)
+        r1 = int(h * 0.95)
+        roi = depth_map_8bit[r0:r1, :].astype(np.float32)
+
+        if roi.shape[0] < 2:
+            return False
+
+        # Gradiente vertical por columna: diferencia entre filas consecutivas
+        grad_vertical = np.abs(np.diff(roi, axis=0))  # shape (r1-r0-1, w)
+
+        # Número de columnas con salto > umbral en cada fila
+        cols_con_salto = np.sum(grad_vertical > UMBRAL_GRAD_DESNIVEL, axis=1)
+        max_cols_afectadas = int(np.max(cols_con_salto))
+
+        # Señal principal: borde horizontal que cubre ≥35% del ancho
+        hay_borde_horizontal = max_cols_afectadas >= (w * UMBRAL_COLS_ANCHO)
+
+        # Señal secundaria: alta varianza en ROI (umbral bajado 35→22)
+        hay_varianza_alta = float(np.std(roi)) > UMBRAL_STD_DESNIVEL
+
+        return hay_borde_horizontal or hay_varianza_alta
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Detector de paredes / barreras (mejorado)
+    # ──────────────────────────────────────────────────────────────────────────
 
     @staticmethod
     def _detectar_pared(
@@ -104,32 +162,54 @@ class MidasDepthEstimator:
         h: int,
         w: int,
     ) -> "str | None":
-        
-        # Banda central: filas 25% – 75%  (evita suelo y techo)
+        """
+        Detecta paredes, puertas o barreras en la banda central del frame
+        (filas 25%–75%) dividida en 5 zonas horizontales para mayor granularidad.
+
+        Criterios de una pared:
+          1. Media alta (superficie muy cercana).
+          2. Std baja (superficie plana y uniforme).
+          3. Gradiente horizontal bajo (∇x bajo = superficie lisa, no objeto rugoso).
+        """
         r0 = int(h * 0.25)
         r1 = int(h * 0.75)
         banda = depth_map_8bit[r0:r1, :]
 
-        # Dividir horizontalmente en tres tercios
-        t = w // 3
-        zonas = {
-            "izquierda": banda[:, :t],
-            "frente":    banda[:, t:2*t],
-            "derecha":   banda[:, 2*t:],
+        # Cinco zonas horizontales → colapsar a tres zonas cardinales
+        t = w // 5
+        limites = [0, t, 2*t, 3*t, 4*t, w]
+        nombres_raw = ["izquierda", "semiizquierda", "frente", "semiderecha", "derecha"]
+        # Mapa de colapso: semi-zonas → zona cardinal
+        colapso = {
+            "izquierda":    "izquierda",
+            "semiizquierda":"izquierda",
+            "frente":       "frente",
+            "semiderecha":  "derecha",
+            "derecha":      "derecha",
         }
 
-        # Umbrales (ajustar si hay falsos positivos en cámara específica)
-        UMBRAL_MEDIA = 175.0   # Superficie muy cercana
-        UMBRAL_STD   = 30.0    # Superficie plana/uniforme (pared, no objeto rugoso)
+        candidatos: dict[str, float] = {}   # zona_cardinal → media de profundidad
 
-        candidatos = {}  # zona → media de profundidad
-        for nombre, roi in zonas.items():
+        for i, nombre in enumerate(nombres_raw):
+            roi = banda[:, limites[i]:limites[i+1]]
             if roi.size == 0:
                 continue
+
             media = float(np.mean(roi))
             std   = float(np.std(roi))
-            if media > UMBRAL_MEDIA and std < UMBRAL_STD:
-                candidatos[nombre] = media
+
+            # Gradiente horizontal: mide cuánto cambia lateralmente la profundidad
+            grad_h = float(np.mean(np.abs(np.diff(roi.astype(np.float32), axis=1))))
+
+            es_cercana = media > UMBRAL_MEDIA_PARED
+            es_plana   = std   < UMBRAL_STD_PARED
+            es_lisa    = grad_h < UMBRAL_GRAD_HORIZ_PARED
+
+            if es_cercana and es_plana and es_lisa:
+                zona_cardinal = colapso[nombre]
+                # Conservar la media más alta (superficie más cercana) por zona cardinal
+                if candidatos.get(zona_cardinal, 0.0) < media:
+                    candidatos[zona_cardinal] = media
 
         if not candidatos:
             return None
@@ -139,74 +219,74 @@ class MidasDepthEstimator:
             return "frente"
         return max(candidatos, key=candidatos.__getitem__)
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Modo standalone (test con webcam)
+# ──────────────────────────────────────────────────────────────────────────────
+
 def main():
-    print("Iniciando Módulo MiDaS - Detector de Escalones y Precipicios...")
-    
-    # Instanciamos la clase, lo cual cargará el modelo en la VRAM
+    print("Iniciando Módulo MiDaS — Detector de Desniveles y Paredes...")
+
     detector = MidasDepthEstimator()
-    
-    # Iniciar la cámara web (índice 0 por defecto)
+
     cap = cv2.VideoCapture(0)
-    
     if not cap.isOpened():
-        print("Error crítico: Problemas al abrir la cámara local.")
+        print("[ERROR] No se puede abrir la cámara local.")
         return
-        
-    print("\nPuedes presionar 'q' sobre la ventana de video en cualquier momento para salir.\n")
-    
-    # Marcador para mostrar FPS en tiempo real
+
+    print("\nPresiona 'q' para salir.\n")
     prev_time = time.time()
-    
+
     while True:
         ret, frame = cap.read()
         if not ret:
-            print("No se pudo obtener el frame de la cámara. Finalizando stream.")
+            print("No se pudo obtener frame. Finalizando.")
             break
-            
-        # Calcular FPS del frame actual
+
         current_time = time.time()
-        fps = 1.0 / (current_time - prev_time)
+        fps = 1.0 / max(current_time - prev_time, 1e-6)
         prev_time = current_time
-            
-        # 1. Ejecutar todo nuestro pipeline MiDaS
-        depth_map_8bit, peligro = detector.estimate_depth_and_danger(frame)
-        
-        # 2. Construir la Visualización
-        # Aplicar el mapa de colores JET sobre la escala de grises de 8-bit para apreciar calor
+
+        # Inferencia — ahora retorna 3 valores (profundidad, desnivel, pared)
+        depth_map_8bit, peligro_suelo, pared_zona = detector.estimate_depth_and_danger(frame)
+
         depth_colormap = cv2.applyColorMap(depth_map_8bit, cv2.COLORMAP_JET)
-        
+
         h, w, _ = frame.shape
         roi_top = int(h * 0.7)
-        
-        # Preparar indicadores visuales basados en si hay o no peligro
-        color_interfaz = (0, 255, 0) # Verde: Seguro (BGR en OpenCV)
-        texto_estado = "Suelo detectado"
-        
-        if peligro:
-            color_interfaz = (0, 0, 255) # Rojo: Peligro inminente (BGR)
-            texto_estado = "!!! ESCALERAS DETECTADAS !!!"
-            # Alertar a consola
-            print(f"[{time.strftime('%H:%M:%S')}] {texto_estado}")
-        
-        # Dibujar un rectángulo sobre el frame indicando nuestro 30% inferior (el ROI de análisis)
-        cv2.rectangle(frame, (0, roi_top), (w, h), color_interfaz, 2)
-        
-        # Estampar la información y los FPS
-        cv2.putText(frame, texto_estado, (15, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, color_interfaz, 2, cv2.LINE_AA)
-        cv2.putText(frame, f"FPS: {fps:.1f}", (15, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2, cv2.LINE_AA)
-        cv2.putText(frame, "Caja = 30% ROI", (w - 180, h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color_interfaz, 2)
-        
-        # Mostrar el frame procesado y el mapa de calor independientemente
-        cv2.imshow("Original + ROI Midas", frame)
+
+        # Color e información de estado
+        if peligro_suelo:
+            color_roi  = (0, 0, 255)
+            texto_roi  = "!!! DESNIVEL / ESCALON DETECTADO !!!"
+            print(f"[{time.strftime('%H:%M:%S')}] {texto_roi}")
+        else:
+            color_roi  = (0, 255, 0)
+            texto_roi  = "Suelo seguro"
+
+        cv2.rectangle(frame, (0, roi_top), (w, h), color_roi, 2)
+        cv2.putText(frame, texto_roi, (15, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, color_roi, 2, cv2.LINE_AA)
+        cv2.putText(frame, f"FPS: {fps:.1f}", (15, 75),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2, cv2.LINE_AA)
+
+        if pared_zona:
+            texto_pared = f"PARED {pared_zona.upper()}"
+            cv2.putText(frame, texto_pared, (15, 110),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2, cv2.LINE_AA)
+
+        cv2.putText(frame, "ROI 40-95%", (w - 160, h - 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, color_roi, 2)
+
+        cv2.imshow("Original + ROI MiDaS", frame)
         cv2.imshow("Mapa de Profundidad MiDaS", depth_colormap)
-        
-        # Escuchar eventos de la GUI, salir con 'q'
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+
+        if cv2.waitKey(1) & 0xFF == ord("q"):
             break
-            
-    # Liberar recursos y VRAM
+
     cap.release()
     cv2.destroyAllWindows()
+
 
 if __name__ == "__main__":
     main()

@@ -37,12 +37,19 @@ COOLDOWN_ALERTA_SEG = 4.0
 UMBRAL_AREA_RELEVANTE = 0.03
 
 # Directorio donde están los MP3 pregrabados generados por generador_audios.py.
-
 DIRECTORIO_AUDIO = "audios"
 
 # Escalones de distancia disponibles, si MiDaS da un valor intermedio,
 # obtener_archivo_audio() lo aproximará al escalón más cercano.
 ESCALONES_DISTANCIA = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
+
+# Tiempo máximo (segundos) que un audio puede esperar en cola antes de descartarse.
+# Evita reproducir alertas de objetos que ya pasaron mientras se avanzaba.
+MAX_EDAD_AUDIO_SEG = 1.5
+
+# Distancia (metros) por debajo de la cual se activa el beep de proximidad.
+# Es independiente de los MP3 pregrabados y se genera directamente por pygame.
+UMBRAL_DISTANCIA_BEEP = 0.8
 
 # Caché de archivos de audio en memoria
 ARCHIVOS_AUDIO_DISPONIBLES: set[str] = set()
@@ -77,20 +84,34 @@ def _audio_existe(ruta: str) -> bool:
 class AudioWorker:
 
     def __init__(self):
-        self._cola: queue.Queue[str | None] = queue.Queue(maxsize=3)
+        # La cola almacena tuplas (archivo: str | None, encolado_en: float)
+        # El worker descarta items con más de MAX_EDAD_AUDIO_SEG segundos de espera,
+        # evitando reproducir alertas de objetos que ya pasaron.
+        self._cola: queue.Queue = queue.Queue(maxsize=3)
         self._activo = True
         self._lock = threading.Lock()
         self._interrupcion_activa = threading.Event()
 
         if not pygame.mixer.get_init():
-            pygame.mixer.init(frequency=44100, size=-16, channels=1, buffer=512)
+            pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
+
+        # Canal dedicado para beeps de proximidad (no pasa por la cola de MP3)
+        pygame.mixer.set_num_channels(4)
+        self._canal_beep = pygame.mixer.Channel(1)
+        # Pre-generar dos tonos de beep: normal y urgente
+        self._beep_normal  = self._generar_tono(freq_hz=880,  duracion_ms=120, volumen=0.7)
+        self._beep_urgente = self._generar_tono(freq_hz=1320, duracion_ms=80,  volumen=0.9)
 
         self._hilo = threading.Thread(
             target=self._loop_audio, daemon=True, name="AudioWorker"
         )
         self._hilo.start()
 
+    # ── API pública ────────────────────────────────────────────────────────────
+
     def encolar(self, archivo: str, es_critico: bool = False):
+        """Encola un archivo MP3 para reproducción asincrónica."""
+        ahora = time.time()
 
         if es_critico:
             with self._lock:
@@ -123,27 +144,48 @@ class AudioWorker:
                 try:
                     self._cola.get_nowait()
                     self._cola.task_done()
-                    print(f"[AUDIO][DROP] Cola llena → descartado audio antiguo para insertar: {archivo}")
+                    print(f"[AUDIO][DROP] Cola llena → descartado audio antiguo")
                 except queue.Empty:
                     pass
-            self._cola.put_nowait(archivo)
+            self._cola.put_nowait((archivo, ahora))
+
+    def beep_proximidad(self, urgente: bool = False):
+        """Reproduce un beep de alerta de proximidad instantaneamente.
+        No pasa por la cola: es imperceptiblemente rápido y nunca queda obsoleto.
+        urgente=True  → tono más agudo y breve (objeto a <0.5 m)
+        urgente=False → tono estándar (objeto a 0.5–0.8 m)
+        """
+        if self._canal_beep.get_busy():
+            return   # Ya suena un beep, no apilar
+        sonido = self._beep_urgente if urgente else self._beep_normal
+        self._canal_beep.play(sonido)
 
     def detener(self):
         self._activo = False
-        self._cola.put(None)
+        self._cola.put((None, 0.0))
+
+    # ── Bucle interno del hilo ──────────────────────────────────────────────
 
     def _loop_audio(self):
         while self._activo:
-            archivo = self._cola.get()
+            item = self._cola.get()
+            archivo, encolado_en = item
 
             if archivo is None:
                 break
+
+            # ✔ Anti-staleness: descartar si el audio lleva demasiado tiempo esperando.
+            # Esto evita reproducir "hay una silla al frente" cuando ya se pasó de largo.
+            edad = time.time() - encolado_en
+            if edad > MAX_EDAD_AUDIO_SEG:
+                print(f"[AUDIO][STALE] Descartado por viejo ({edad:.1f}s > {MAX_EDAD_AUDIO_SEG}s): {archivo}")
+                self._cola.task_done()
+                continue
 
             print(f"[AUDIO] >> {archivo}")
 
             try:
                 if not _audio_existe(archivo):
-                    # Archivo no grabado → bip genérico si existe, si no silencio
                     bip = os.path.join(DIRECTORIO_AUDIO, "beep.mp3")
                     if _audio_existe(bip):
                         archivo = bip
@@ -151,7 +193,6 @@ class AudioWorker:
                         self._cola.task_done()
                         continue
 
-                # el nuevo audio, para no abortar inmediatamente su propia reproducción.
                 self._interrupcion_activa.clear()
                 pygame.mixer.music.load(archivo)
                 pygame.mixer.music.play()
@@ -165,6 +206,25 @@ class AudioWorker:
                 print(f"[AudioWorker] Error al reproducir '{archivo}': {e}")
 
             self._cola.task_done()
+
+    # ── Helper estático: generador de tono sinusoidal ──────────────────────
+
+    @staticmethod
+    def _generar_tono(
+        freq_hz: int   = 880,
+        duracion_ms: int = 120,
+        volumen: float   = 0.75,
+    ) -> pygame.mixer.Sound:
+        """Genera un tono puro (seno) como Sound de pygame sin necesitar ningún archivo.
+        Funciona aunque el directorio audios/ no tenga un beep.mp3.
+        """
+        sample_rate = 44100
+        n = int(sample_rate * duracion_ms / 1000)
+        t = np.linspace(0, duracion_ms / 1000.0, n, endpoint=False)
+        onda = (np.sin(2 * np.pi * freq_hz * t) * volumen * 32767).astype(np.int16)
+        # pygame.mixer.init con channels=2 requiere audio estéreo
+        onda_stereo = np.column_stack([onda, onda])
+        return pygame.sndarray.make_sound(onda_stereo)
 
 
 # GestorCooldown: anti-spam por clase de objeto
@@ -249,6 +309,12 @@ def obtener_archivo_audio(
     distancia_metros: float,
 ) -> None:
 
+    # 0. Beep de proximidad: objeto DEMASIADO cerca → alerta instantánea sin cola
+    # Este beep nunca puede quedar obsoleto porque no pasa por la cola.
+    if distancia_metros < UMBRAL_DISTANCIA_BEEP:
+        urgente = distancia_metros < 0.5
+        audio_worker.beep_proximidad(urgente=urgente)
+
     # 1. Traducir posición larga a clave de nombre de archivo
     mapa_pos = {
         "a tu izquierda": "izquierda",
@@ -261,7 +327,6 @@ def obtener_archivo_audio(
     dist_binned = _redondear_escalon(distancia_metros)
 
     # 3. Construir nombre del archivo (ej. "silla_izquierda_1_0.mp3")
-    # La distancia se formatea como float con 1 decimal y el punto reemplazado por _
     dist_sufijo    = f"{dist_binned:.1f}".replace(".", "_")
     nombre_archivo = f"{clase_nombre}_{pos_clave}_{dist_sufijo}.mp3"
     ruta_audio     = os.path.join(DIRECTORIO_AUDIO, nombre_archivo)
@@ -271,9 +336,7 @@ def obtener_archivo_audio(
 
     # 5. Verificar existencia (O(1) con caché) y encolar
     if _audio_existe(ruta_audio):
-        # Caso normal: archivo pregrabado encontrado → reproducir
         audio_worker.encolar(ruta_audio, es_critico=es_critico)
-
     else:
         # 6. Fallback: beep genérico si el MP3 específico no existe
         print(
@@ -283,7 +346,7 @@ def obtener_archivo_audio(
         ruta_beep = os.path.join(DIRECTORIO_AUDIO, "beep.mp3")
         if _audio_existe(ruta_beep):
             audio_worker.encolar(ruta_beep, es_critico=es_critico)
-        # Si tampoco existe el beep → silencio total (pass implícito)
+        # Si tampoco existe el beep → silencio total (el beep sintético ya sonó arriba)
 
 
 # MonitorSaludCamara: detecta condiciones degradadas del entorno visual
