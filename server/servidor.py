@@ -1,52 +1,90 @@
-import asyncio
-from fastapi import FastAPI, WebSocket
-import base64
-import cv2
-import numpy as np
-import time
+import React, { useEffect, useRef } from 'react';
+import { StyleSheet, Text, View } from 'react-native';
+import { CameraView, useCameraPermissions } from 'expo-camera';
+import { useKeepAwake } from 'expo-keep-awake';
 
-app = FastAPI()
+export default function Index() {
+    // Mantiene tu pantalla encendida
+    useKeepAwake();  
 
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    print("¡Conexión establecida con el teléfono!")
+    const [permission, requestPermission] = useCameraPermissions();
+    const cameraRef = useRef<CameraView>(null);
+    const ws = useRef<WebSocket | null>(null);
     
-    try:
-        while True:
-            # 1. Inicia el cronómetro al recibir datos
-            data = await websocket.receive_text()
-            start_time = time.time() 
-            print(f"frame recibido")
-            # 2. Decodificación de imagen
-            # Tip profesional: base64.b64decode es costoso para el CPU, 
-            # pero necesario para strings.
-            img_bytes = base64.b64decode(data)
-            nparr = np.frombuffer(img_bytes, np.uint8)
-            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    // BANDERA DE BLOQUEO: Evita que se sature la cámara
+    const isProcessing = useRef(false);
 
-            if frame is not None:
-                #YOLO / MiDaS
+    useEffect(() => {
+        (async () => {
+            await requestPermission();
+            
+            // Reemplaza con la IP de la laptop RTX de tu compañero
+            ws.current = new WebSocket('ws://10.242.180.213:8000/ws');
+            
+            ws.current.onopen = () => console.log("¡Conectado!");
+            ws.current.onerror = (e) => console.log("Error WS:", e);
+        })();
 
+        return () => {
+            if (ws.current) {
+                ws.current.close();
+            }
+        };
+    }, []);
+
+    const sendFrame = async () => {
+        if (isProcessing.current) return;
+        
+        if (cameraRef.current && ws.current?.readyState === WebSocket.OPEN) {
+            isProcessing.current = true; 
+            
+            try {
+                const photo = await cameraRef.current.takePictureAsync({
+                    quality: 0.1,
+                    base64: true,
+                    skipProcessing: true,
+                });
                 
-                # 3. Lógica de respuesta
-                mensaje_respuesta = "Persona detectada a 2 metros"
-                await websocket.send_text(mensaje_respuesta)
+                if (photo && photo.base64) {
+                    ws.current.send(photo.base64);
+                }
+            } catch (err) {
+                console.log("Error capturando frame:", err);
+            } finally {
+                isProcessing.current = false; 
+            }
+        }
+    };
 
-                # 4. Finaliza cronómetro y calcula FPS/Latencia
-                end_time = time.time()
-                latencia_ms = (end_time - start_time) * 1000
-                fps_actual = 1.0 / (end_time - start_time) if (end_time - start_time) > 0 else 0
-                
-                # Limpiamos la terminal para que sea legible
-                print(f"DEBUG | Latencia: {latencia_ms:.2f}ms | FPS: {fps_actual:.1f}")
-                
-    except Exception as e:
-        print(f"Conexión finalizada o error: {e}")
-    finally:
-        await websocket.close()
+    useEffect(() => {
+        // Configuramos a 33ms para apuntar a los 30 FPS estables
+        const interval = setInterval(sendFrame, 33);
+        return () => clearInterval(interval);
+    }, []);
 
-if __name__ == "__main__":
-    import uvicorn
-    # Ejecuta esto para que reconozca tu archivo como el principal
-    uvicorn.run(app, host="0.0.0.0", port=8081)
+    if (!permission) return <View />;
+    if (!permission.granted) return <Text>No hay acceso a la cámara</Text>;
+
+    return (
+        <View style={styles.container}>
+            <CameraView style={styles.camera} ref={cameraRef} facing="back" />
+            
+            <View style={styles.overlay}>
+                <Text style={styles.text}>Asistente Visual Conectado</Text>
+            </View>
+        </View>
+    );
+}
+
+const styles = StyleSheet.create({
+    container: { flex: 1, backgroundColor: '#000' },
+    camera: { flex: 1 },
+    overlay: { 
+        position: 'absolute',
+        bottom: 50, 
+        left: 0, 
+        right: 0, 
+        alignItems: 'center' 
+    },
+    text: { color: 'white', backgroundColor: 'rgba(0,0,0,0.7)', padding: 15, borderRadius: 20 }
+});
