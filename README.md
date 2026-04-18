@@ -245,7 +245,7 @@ Opera sobre el **ROI inferior** (30% más bajo del frame, filas $0.7h$ a $h$):
 1. **Desviación estándar del ROI:**
 
 $$
-\sigma_{\text{roi}} = \text{std}(\text{depth\_map}[0.7h : h, :])
+\sigma_{\text{roi}} = \operatorname{std}(D[0.7h : h, :])
 $$
 
 Si $\sigma_{\text{roi}} > 60.0$, se detecta una discontinuidad significativa en el suelo (escalón, rampa abrupta o precipicio).
@@ -303,16 +303,6 @@ iris/
 ├── .env                    # ELEVENLABS_API_KEY y ELEVENLABS_VOICE_ID (no versionado)
 └── .gitignore
 ```
-
----
-
-## Roadmap
-
-- [ ] **Pruebas con usuarios reales.** Validar la usabilidad y la latencia percibida con personas con discapacidad visual en entornos controlados.
-- [ ] **Precarga de mapa interior.** Cargar un mapa predefinido del espacio (planta de oficina, hotel) para complementar la detección en tiempo real con contexto topológico.
-- [ ] **App companion iOS nativa.** Reemplazar la dependencia de apps genéricas de cámara por una app dedicada que optimice el encoding JPEG, WS framing y la rotación de frame.
-- [ ] **Modelo YOLO fine-tuned.** Entrenar un modelo específico para obstáculos de interior (puertas entreabiertas, escaleras, columnas, señalización) en lugar de depender del vocabulario genérico de COCO.
-- [ ] **Migración a ONNX Runtime.** Exportar ambos modelos a ONNX para reducir dependencia de PyTorch en runtime y potencialmente correr en hardware sin NVIDIA (Intel NPU, Apple Neural Engine).
 
 ---
 
