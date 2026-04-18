@@ -18,17 +18,6 @@ async def websocket_endpoint(websocket: WebSocket):
             data = await websocket.receive_text()
             start_time = time.time() 
 
-<<<<<<< HEAD
-    useEffect(() => {
-        (async () => {
-            await requestPermission();
-            
-            ws.current = new WebSocket('ws://10.242.180.213:8000/ws');
-            
-            ws.current.onopen = () => console.log("¡Conectado!");
-            ws.current.onerror = (e) => console.log("Error WS:", e);
-        })();
-=======
             # 2. Decodificar la imagen a formato OpenCV
             try:
                 img_bytes = base64.b64decode(data)
@@ -37,7 +26,6 @@ async def websocket_endpoint(websocket: WebSocket):
             except Exception as e:
                 print(f"Error decodificando imagen: {e}")
                 continue
->>>>>>> 81ce2caf6b1e496d8752078373d4b934c714bc3a
 
             if frame is not None:
                #yolo/midas

@@ -86,18 +86,18 @@ def resolver_fuente_video(modo: str):
         print(f"[FUENTE] Modo: WebSocket — puerto {WS_PUERTO}")
         return None, "WEBSOCKET"
 
-    if modo == "telefono":
-        print(f"[FUENTE] Modo: Teléfono  →  {FUENTE_TELEFONO_URL}")
-        print("[FUENTE] Verificando conexión con el teléfono...")
-        cap_test = cv2.VideoCapture(FUENTE_TELEFONO_URL)
+    if modo == "camara_ip":
+        url = _url_camara_ip(args.ip)
+        print(f"[FUENTE] Modo: Cámara IP  →  {url}")
+        print("[FUENTE] Verificando conexión...")
+        cap_test = cv2.VideoCapture(url)
         if cap_test.isOpened():
             cap_test.release()
-            print("[FUENTE] ✔ Teléfono conectado.")
-            return FUENTE_TELEFONO_URL, "TELEFONO"
+            print("[FUENTE] Cámara IP conectada.")
+            return url, f"CAMARA IP ({args.ip})"
         else:
             cap_test.release()
-            print("[FUENTE][WARN] No se pudo conectar al teléfono.")
-            print(f"[FUENTE][WARN] Verifica que la IP sea correcta: {FUENTE_TELEFONO_URL}")
+            print(f"[FUENTE][WARN] No se pudo conectar a {url}")
             print("[FUENTE][WARN] Usando webcam local como fallback.")
             return 0, "WEBCAM (fallback)"
 
