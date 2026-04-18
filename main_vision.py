@@ -236,7 +236,14 @@ def main():
             conteo_cen: dict = {}
             conteo_der: dict = {}
 
-            depth_map, peligro_suelo, pared_zona = midas.estimate_depth_and_danger(frame)
+            # FIX: usar midas_worker (no bloqueante) en lugar de midas.estimate_depth_and_danger
+            midas_worker.enviar(frame.copy())
+            depth_map, peligro_suelo, pared_zona = midas_worker.resultado()
+            if depth_map is None:
+                depth_map     = np.zeros((alto, ancho), dtype=np.uint8)
+                peligro_suelo = False
+                pared_zona    = None
+
             resultado = yolo.detectar(frame)
 
             for box in resultado.boxes:
@@ -397,7 +404,7 @@ def main():
         conteo_cen: dict = {}
         conteo_der: dict = {}
 
-        # 1: MiDaS → enviár frame al worker (no bloquea) y leer último resultado disponible
+        # 1: MiDaS → enviar frame al worker (no bloquea) y leer último resultado disponible
         midas_worker.enviar(frame.copy())
         depth_map, peligro_suelo, pared_zona = midas_worker.resultado()
         if depth_map is None:
