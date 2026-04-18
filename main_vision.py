@@ -32,6 +32,56 @@ from fusion_logica import (
 def _url_camara_ip(ip: str) -> str:
     return f"http://{ip}:8080/video"
 
+
+class MidasWorker:
+
+    def __init__(self, estimador: "MidasDepthEstimator", escala: float = 0.5):
+        self._estimador = estimador
+        self._escala    = escala
+        self._cola_in:  queue.Queue = queue.Queue(maxsize=1)
+        self._lock      = threading.Lock()
+        self._depth_map:     np.ndarray | None = None
+        self._peligro_suelo: bool              = False
+        self._pared_zona:    str | None        = None
+        t = threading.Thread(target=self._loop, daemon=True, name="MiDaS-Worker")
+        t.start()
+
+    # --- API pública (thread-safe) ---
+
+    def enviar(self, frame: np.ndarray) -> None:
+        if self._cola_in.full():
+            try:
+                self._cola_in.get_nowait()
+            except queue.Empty:
+                pass
+        try:
+            self._cola_in.put_nowait(frame)
+        except queue.Full:
+            pass
+
+    def resultado(self) -> tuple:
+        """Devuelve (depth_map, peligro_suelo, pared_zona) sin bloquear."""
+        with self._lock:
+            return self._depth_map, self._peligro_suelo, self._pared_zona
+
+    # --- Bucle interno del hilo ---
+
+    def _loop(self) -> None:
+        while True:
+            frame = self._cola_in.get()          # Bloquea SOLO este hilo
+            try:
+                peq  = cv2.resize(frame, (0, 0), fx=self._escala, fy=self._escala)
+                d, p, z = self._estimador.estimate_depth_and_danger(peq)
+                alto, ancho = frame.shape[:2]
+                d_full = cv2.resize(d, (ancho, alto), interpolation=cv2.INTER_LINEAR)
+                with self._lock:
+                    self._depth_map     = d_full
+                    self._peligro_suelo = p
+                    self._pared_zona    = z
+            except Exception as e:
+                print(f"[MiDaS-Worker] Error: {e}")
+
+
 # Configuración del servidor WebSocket
 WS_PUERTO   = 8081
 _frame_queue: queue.Queue = queue.Queue(maxsize=2)
@@ -127,7 +177,8 @@ def main():
     yolo = YoloDetector()
 
     print("[2/3] Cargando MiDaS_small (FP16)...")
-    midas = MidasDepthEstimator()
+    midas        = MidasDepthEstimator()
+    midas_worker = MidasWorker(midas, escala=0.5)  # Hilo de fondo, no bloquea el loop
 
     # 2. Iniciar módulo de audio y cooldowns
     print("[3/3] Iniciando AudioWorker (MP3 locales)...")
@@ -312,12 +363,7 @@ def main():
     C_BG      = (15, 15, 15)
 
     t_fps         = time.time()
-    n_frame       = 0      # Contador de frames para el throttle de MiDaS
-    depth_map     = None   # Caché del último mapa de profundidad calculado
-    peligro_suelo = False
-    pared_zona    = None
-    MIDAS_CADA_N  = 3      # Ejecutar MiDaS 1 de cada N frames (ajusta según FPS)
-    ESCALA_INF    = 0.5    # Escalar frame al 50% antes de inferencia MiDaS
+    n_frame       = 0
 
     while cap.isOpened():
         ret, frame = cap.read()
@@ -351,13 +397,12 @@ def main():
         conteo_cen: dict = {}
         conteo_der: dict = {}
 
-        # 1: MiDaS → mapa de profundidad (solo cada MIDAS_CADA_N frames para ahorrar GPU)
-        if n_frame % MIDAS_CADA_N == 0 or depth_map is None:
-            # Reducir resolución de entrada acelera MiDaS sin afectar la calidad de alerta
-            frame_pequeño = cv2.resize(frame, (0, 0), fx=ESCALA_INF, fy=ESCALA_INF)
-            depth_small, peligro_suelo, pared_zona = midas.estimate_depth_and_danger(frame_pequeño)
-            # Escalar el mapa de vuelta al tamaño original para la fusión con YOLO
-            depth_map = cv2.resize(depth_small, (ancho, alto), interpolation=cv2.INTER_LINEAR)
+        # 1: MiDaS → enviár frame al worker (no bloquea) y leer último resultado disponible
+        midas_worker.enviar(frame.copy())
+        depth_map, peligro_suelo, pared_zona = midas_worker.resultado()
+        if depth_map is None:
+            # Primera inferencia aún no lista: usar mapa vacío y continuar
+            depth_map = np.zeros((alto, ancho), dtype=np.uint8)
 
         # 2: YOLO → detección de obstáculos con FP16
         resultado = yolo.detectar(frame)
