@@ -1,5 +1,5 @@
 <p align="center">
-  <h1 align="center">👁️ VisionAid</h1>
+  <h1 align="center">👁️ IRIS</h1>
   <p align="center">
     Sistema de asistencia visual en tiempo real para personas con discapacidad visual.
   </p>
