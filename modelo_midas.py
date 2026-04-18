@@ -86,7 +86,7 @@ class MidasDepthEstimator:
         roi_top_30pct = depth_map_8bit[roi_top:int(h * 0.80), :]
         mean_top_roi  = float(np.mean(roi_top_30pct)) if roi_top_30pct.size > 0 else 128.0
 
-        umbral_std        = 35.0   # Discontinuidad en el plano del suelo
+        umbral_std        = 60.0   # Discontinuidad en el plano del suelo (subido para reducir FP en pisos brillantes)
         # Umbral RELATIVO: la parte inferior del suelo es significativamente
         # más lejana (menor profundidad) que la parte superior del mismo ROI.
         # Evita el fallo del umbral absoluto 80 que era inalcanzable con norm min/max.
@@ -124,9 +124,11 @@ class MidasDepthEstimator:
             "derecha":   banda[:, 2*t:],
         }
 
-        # Umbrales (ajustar si hay falsos positivos en cámara específica)
-        UMBRAL_MEDIA = 175.0   # Superficie muy cercana
-        UMBRAL_STD   = 30.0    # Superficie plana/uniforme (pared, no objeto rugoso)
+        # Umbrales calibrados en MVP:
+        #   UMBRAL_MEDIA: la zona debe estar muy cerca del lente (valor alto = cercano en MiDaS invertido)
+        #   UMBRAL_STD:   la zona debe ser muy plana (pared lisa), no un objeto rugoso o escena mixta
+        UMBRAL_MEDIA = 170.0   # Superficie muy cercana
+        UMBRAL_STD   = 15.0    # Superficie plana/uniforme (pared, no objeto rugoso)
 
         candidatos = {}  # zona → media de profundidad
         for nombre, roi in zonas.items():

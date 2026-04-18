@@ -33,6 +33,11 @@ CONSTANTE_FOCAL = 350.0
 # Cooldown entre alertas de la misma clase de objeto
 COOLDOWN_ALERTA_SEG = 4.0
 
+# Cooldown especial para alertas críticas de suelo (clase -1: escalón/precipicio).
+# Debe coincidir aproximadamente con la duración del MP3 "escalon_frente.mp3"
+# para evitar el "efecto metralleta" sin silenciar la alerta más de lo necesario.
+COOLDOWN_CRITICO_SEG = 2.0
+
 # Área normalizada mínima para considerar un objeto relevante
 UMBRAL_AREA_RELEVANTE = 0.03
 
@@ -170,13 +175,39 @@ class AudioWorker:
 # GestorCooldown: anti-spam por clase de objeto
 
 class GestorCooldown:
+    """Anti-spam de alertas por clase de objeto.
 
-    def __init__(self, cooldown_seg: float = COOLDOWN_ALERTA_SEG):
+    Parámetros
+    ----------
+    cooldown_seg : float
+        Cooldown general (segundos) entre alertas de la misma clase.
+    cooldowns_especiales : dict[int, float] | None
+        Mapa opcional {clase_id: segundos} para clases que necesitan
+        un cooldown distinto al general.  Por defecto se incluye:
+          -1 → COOLDOWN_CRITICO_SEG (escalón/precipicio, 2.0 s)
+    """
+
+    def __init__(
+        self,
+        cooldown_seg: float = COOLDOWN_ALERTA_SEG,
+        cooldowns_especiales: dict | None = None,
+    ):
         self._cd = cooldown_seg
         self._registro: dict[int, float] = {}
 
+        # Cooldowns especiales: permiten configurar tiempos distintos por clase.
+        # La clase -1 (peligro de suelo) usa el cooldown crítico por defecto.
+        self._especiales: dict[int, float] = {-1: COOLDOWN_CRITICO_SEG}
+        if cooldowns_especiales:
+            self._especiales.update(cooldowns_especiales)
+
+    def _cooldown_para(self, clase_id: int) -> float:
+        """Devuelve el cooldown aplicable a esta clase (especial o general)."""
+        return self._especiales.get(clase_id, self._cd)
+
     def puede_alertar(self, clase_id: int) -> bool:
-        return (time.time() - self._registro.get(clase_id, 0.0)) >= self._cd
+        cd = self._cooldown_para(clase_id)
+        return (time.time() - self._registro.get(clase_id, 0.0)) >= cd
 
     def registrar(self, clase_id: int):
         self._registro[clase_id] = time.time()
