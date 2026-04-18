@@ -20,7 +20,7 @@ Convierte un iPhone montado en el pecho (POV) en un dispositivo de navegación p
 
 ---
 
-## 📽️ Demo
+## Demo
 
 <!-- Reemplaza este bloque con un GIF o enlace a video del sistema funcionando -->
 
@@ -32,23 +32,23 @@ Convierte un iPhone montado en el pecho (POV) en un dispositivo de navegación p
 
 ---
 
-## ⚙️ Cómo Funciona
+## Cómo Funciona
 
 ### Diagrama de Arquitectura
 
 ```mermaid
 graph LR
     subgraph iPhone 12 Mini
-        A["📱 Cámara POV<br/>JPEG sobre WebSocket ~20 FPS"]
+        A["Cámara POV<br/>JPEG sobre WebSocket ~20 FPS"]
     end
 
     subgraph Servidor Local - Python
-        B["🔌 WebSocket Server<br/>ws://0.0.0.0:8081"]
-        C["🧠 YOLOv8s<br/>CUDA FP16<br/>17 clases COCO"]
-        D["🌊 MiDaS_small<br/>CUDA FP16<br/>Hilo de fondo"]
-        E["🔗 Fusión Lógica<br/>Distancia + Posición"]
-        F["🔊 AudioWorker<br/>Cola de prioridad<br/>MP3 pregrabados"]
-        G["🖥️ Monitor Visual<br/>OpenCV + Heatmap"]
+        B["WebSocket Server<br/>ws://0.0.0.0:8081"]
+        C["YOLOv8s<br/>CUDA FP16<br/>17 clases COCO"]
+        D["MiDaS_small<br/>CUDA FP16<br/>Hilo de fondo"]
+        E["Fusión Lógica<br/>Distancia + Posición"]
+        F["AudioWorker<br/>Cola de prioridad<br/>MP3 pregrabados"]
+        G["Monitor Visual<br/>OpenCV + Heatmap"]
     end
 
     A -->|WiFi Hotspot| B
@@ -58,7 +58,7 @@ graph LR
     D --> E
     E --> F
     E --> G
-    F -->|"🎧 Audífonos"| H["👤 Usuario"]
+    F -->|"Audífonos"| H["Usuario"]
 ```
 
 ### Flujo de Procesamiento
@@ -73,7 +73,7 @@ graph LR
 
 ---
 
-## 🛠️ Instalación
+## Instalación
 
 ### Prerrequisitos
 
@@ -85,8 +85,8 @@ graph LR
 ### 1. Clonar el repositorio
 
 ```bash
-git clone https://github.com/tu-usuario/visionaid.git
-cd visionaid
+git clone https://github.com/tu-usuario/iris.git
+cd iris
 ```
 
 ### 2. Crear entorno virtual e instalar dependencias
@@ -129,7 +129,7 @@ python -c "import torch; print(f'CUDA: {torch.cuda.is_available()}, Device: {tor
 
 ---
 
-## 🚀 Uso
+## Uso
 
 ### Modos de fuente de video (`--fuente`)
 
@@ -170,7 +170,7 @@ Para el modo `websocket` (el modo de producción):
 
 ---
 
-## 🎙️ Generación de Audio
+## Generación de Audio
 
 ### Ejecución
 
@@ -217,7 +217,7 @@ Cada archivo MP3 sigue el patrón:
 
 ---
 
-## 🧮 Diseño Técnico
+## Diseño Técnico
 
 ### Estimación de distancia
 
@@ -288,10 +288,10 @@ Esto elimina el jitter causado por la renormalización min-max frame a frame, si
 
 ---
 
-## 📁 Estructura del Proyecto
+## Estructura del Proyecto
 
 ```
-visionaid/
+iris/
 ├── main_vision.py          # Punto de entrada. Args CLI, servidor WebSocket, loop de procesamiento
 ├── modelo_yolo.py          # YoloDetector: wraps YOLOv8s, mapeo COCO→español, helper de género/plural
 ├── modelo_midas.py         # MidasDepthEstimator: profundidad, escaleras, paredes, EMA temporal
@@ -306,7 +306,7 @@ visionaid/
 
 ---
 
-## 🗺️ Roadmap
+## Roadmap
 
 - [ ] **Pruebas con usuarios reales.** Validar la usabilidad y la latencia percibida con personas con discapacidad visual en entornos controlados.
 - [ ] **Precarga de mapa interior.** Cargar un mapa predefinido del espacio (planta de oficina, hotel) para complementar la detección en tiempo real con contexto topológico.
@@ -316,7 +316,7 @@ visionaid/
 
 ---
 
-## 🧰 Construido Con
+## Construido Con
 
 | Componente | Tecnología |
 |-----------|-----------|
@@ -341,7 +341,7 @@ visionaid/
 
 ---
 
-## 👥 Equipo
+## Equipo
 
 <!-- Agrega los miembros del equipo aquí -->
 
@@ -351,6 +351,6 @@ visionaid/
 
 ---
 
-## 📄 Licencia
+## Licencia
 
 Este proyecto está licenciado bajo la [Licencia MIT](LICENSE).
