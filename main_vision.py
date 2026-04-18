@@ -1,4 +1,5 @@
 import os
+import sys
 import asyncio
 import argparse
 import queue
@@ -10,7 +11,7 @@ import pygame
 import websockets
 
 from modelo_midas  import MidasDepthEstimator
-from modelo_yolo   import YoloDetector
+from modelo_yolo   import YoloDetector, nombrar_objetos
 from fusion_logica import (
     AudioWorker,
     GestorCooldown,
@@ -30,29 +31,6 @@ from fusion_logica import (
 # La mayoría de apps de cámara IP (p.ej. IP Webcam para Android) usan este formato:
 def _url_camara_ip(ip: str) -> str:
     return f"http://{ip}:8080/video"
-
-
-def _describir_entorno(
-    conteo_izq: dict,
-    conteo_cen: dict,
-    conteo_der: dict,
-) -> str:
-    """Construye la descripción textual del entorno basada en los conteos
-    de objetos por zona. Función auxiliar compartida por ambas ramas de video."""
-    from modelo_yolo import nombrar_objetos
-    if not conteo_cen and not conteo_izq and not conteo_der:
-        return "El camino está libre."
-    partes = []
-    if conteo_cen:
-        partes.append("Al frente hay " + " y ".join(
-            nombrar_objetos(c, o) for o, c in conteo_cen.items()) + ".")
-    if conteo_izq:
-        partes.append("A tu izquierda hay " + " y ".join(
-            nombrar_objetos(c, o) for o, c in conteo_izq.items()) + ".")
-    if conteo_der:
-        partes.append("A tu derecha hay " + " y ".join(
-            nombrar_objetos(c, o) for o, c in conteo_der.items()) + ".")
-    return " ".join(partes)
 
 
 class MidasWorker:
@@ -258,10 +236,8 @@ def main():
             conteo_cen: dict = {}
             conteo_der: dict = {}
 
-            # Enviar frame al worker de MiDaS (no bloqueante).
-            # No se necesita copy() aquí: la rama WebSocket no reutiliza el frame
-            # después de este punto antes de que el worker lo procese.
-            midas_worker.enviar(frame)
+            # FIX: usar midas_worker (no bloqueante) en lugar de midas.estimate_depth_and_danger
+            midas_worker.enviar(frame.copy())
             depth_map, peligro_suelo, pared_zona = midas_worker.resultado()
             if depth_map is None:
                 depth_map     = np.zeros((alto, ancho), dtype=np.uint8)
@@ -344,7 +320,20 @@ def main():
                 break
             elif tecla == ord("d"):
                 print("\n[BOTÓN D] Descripción del entorno...")
-                descripcion = _describir_entorno(conteo_izq, conteo_cen, conteo_der)
+                partes = []
+                if not conteo_cen and not conteo_izq and not conteo_der:
+                    descripcion = "El camino está libre."
+                else:
+                    if conteo_cen:
+                        partes.append("Al frente hay " + " y ".join(
+                            nombrar_objetos(c, o) for o, c in conteo_cen.items()) + ".")
+                    if conteo_izq:
+                        partes.append("A tu izquierda hay " + " y ".join(
+                            nombrar_objetos(c, o) for o, c in conteo_izq.items()) + ".")
+                    if conteo_der:
+                        partes.append("A tu derecha hay " + " y ".join(
+                            nombrar_objetos(c, o) for o, c in conteo_der.items()) + ".")
+                    descripcion = " ".join(partes)
                 print(f"Descripción: '{descripcion}'\n")
 
         print("\nCerrando sistema (modo WebSocket)...")
@@ -416,8 +405,7 @@ def main():
         conteo_der: dict = {}
 
         # 1: MiDaS → enviar frame al worker (no bloquea) y leer último resultado disponible
-        # No se necesita frame.copy(): el frame no se modifica hasta después de la inferencia.
-        midas_worker.enviar(frame)
+        midas_worker.enviar(frame.copy())
         depth_map, peligro_suelo, pared_zona = midas_worker.resultado()
         if depth_map is None:
             # Primera inferencia aún no lista: usar mapa vacío y continuar
@@ -493,11 +481,11 @@ def main():
                 cooldown.registrar(-2)
 
         # 5: Overlay de tercios, FPS y etiqueta de fuente
-        # NOTA: fps ya fue calculado al inicio del loop (línea de t_fps = time.time()).
-        # Se eliminó el segundo cálculo que sobreescribía t_fps y devolvía FPS=∞.
         cv2.line(frame, (tercio, 0), (tercio, alto), C_TERCIOS, 2)
         cv2.line(frame, (2 * tercio, 0), (2 * tercio, alto), C_TERCIOS, 2)
 
+        fps   = 1.0 / max(time.time() - t_fps, 1e-6)
+        t_fps = time.time()
         cv2.putText(frame, f"FPS: {fps:.1f}", (ancho - 110, 28),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, C_TERCIOS, 2, cv2.LINE_AA)
 
@@ -519,7 +507,20 @@ def main():
         elif tecla == ord("d"):
             # Descripción completa del entorno bajo demanda
             print("\n[BOTÓN D] Descripción del entorno...")
-            descripcion = _describir_entorno(conteo_izq, conteo_cen, conteo_der)
+            partes = []
+            if not conteo_cen and not conteo_izq and not conteo_der:
+                descripcion = "El camino está libre."
+            else:
+                if conteo_cen:
+                    partes.append("Al frente hay " + " y ".join(
+                        nombrar_objetos(c, o) for o, c in conteo_cen.items()) + ".")
+                if conteo_izq:
+                    partes.append("A tu izquierda hay " + " y ".join(
+                        nombrar_objetos(c, o) for o, c in conteo_izq.items()) + ".")
+                if conteo_der:
+                    partes.append("A tu derecha hay " + " y ".join(
+                        nombrar_objetos(c, o) for o, c in conteo_der.items()) + ".")
+                descripcion = " ".join(partes)
             # Descripción solo en consola — no hay MP3 dinámico pregrabado
             print(f"Descripción: '{descripcion}'\n")
 
