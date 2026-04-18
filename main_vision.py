@@ -188,7 +188,7 @@ def main():
             conteo_cen: dict = {}
             conteo_der: dict = {}
 
-            depth_map, peligro_suelo = midas.estimate_depth_and_danger(frame)
+            depth_map, peligro_suelo, pared_zona = midas.estimate_depth_and_danger(frame)
             resultado = yolo.detectar(frame)
 
             for box in resultado.boxes:
@@ -235,6 +235,15 @@ def main():
                 if cooldown.puede_alertar(-1):
                     audio.encolar(os.path.join(DIRECTORIO_AUDIO, "escalon_frente.mp3"), es_critico=True)
                     cooldown.registrar(-1)
+
+            if pared_zona:
+                nombre_pared = f"pared_{pared_zona}.mp3"
+                cv2.putText(frame, f"PARED {pared_zona.upper()}",
+                            (12, 56), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.6, C_PELIGRO, 2, cv2.LINE_AA)
+                if cooldown.puede_alertar(-2):
+                    audio.encolar(os.path.join(DIRECTORIO_AUDIO, nombre_pared), es_critico=True)
+                    cooldown.registrar(-2)
 
             cv2.line(frame, (tercio, 0), (tercio, alto), C_TERCIOS, 2)
             cv2.line(frame, (2 * tercio, 0), (2 * tercio, alto), C_TERCIOS, 2)
@@ -332,7 +341,7 @@ def main():
         conteo_der: dict = {}
 
         # 1: MiDaS → mapa de profundidad + detección de peligro en el suelo
-        depth_map, peligro_suelo = midas.estimate_depth_and_danger(frame)
+        depth_map, peligro_suelo, pared_zona = midas.estimate_depth_and_danger(frame)
 
         # 2: YOLO → detección de obstáculos con FP16
         resultado = yolo.detectar(frame)
@@ -393,6 +402,15 @@ def main():
             if cooldown.puede_alertar(-1):
                 audio.encolar(os.path.join(DIRECTORIO_AUDIO, "escalon_frente.mp3"), es_critico=True)
                 cooldown.registrar(-1)
+
+        if pared_zona:
+            nombre_pared = f"pared_{pared_zona}.mp3"
+            cv2.putText(frame, f"PARED {pared_zona.upper()}",
+                        (12, 56), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6, C_PELIGRO, 2, cv2.LINE_AA)
+            if cooldown.puede_alertar(-2):
+                audio.encolar(os.path.join(DIRECTORIO_AUDIO, nombre_pared), es_critico=True)
+                cooldown.registrar(-2)
 
         # 5: Overlay de tercios, FPS y etiqueta de fuente
         cv2.line(frame, (tercio, 0), (tercio, alto), C_TERCIOS, 2)

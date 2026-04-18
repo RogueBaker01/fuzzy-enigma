@@ -70,34 +70,74 @@ class MidasDepthEstimator:
         depth_map_8bit = (depth_map_normalized * 255.0).astype(np.uint8)
         
         # 4. Lógica de Detección de Peligro (Escaleras/Precipicio hacia abajo)
-        # Extraer ROI (Región de Interés): El 30% más inferior del frame visualizado
+        # ROI inferior: el 30% más bajo del frame
         h, w = depth_map_8bit.shape
         roi_top = int(h * 0.7)
         roi = depth_map_8bit[roi_top:h, :]
-        
-        # Lógica Matemática
+
         # Valores ALTOS (cercanos a 255) = CERCANO al lente.
         # Valores BAJOS (cercanos a 0) = LEJANO al lente o sin obstáculo.
-        
-        # Estrategia Edge Computing (ultra-rápida y a bajo coste computacional):
-        # 1. Calculamos la desviación estándar del ROI. Una alta desviación indica una discontinuidad 
-        #    muy marcada (como el borde de un escalón).
-        # 2. Revisamos el promedio del 5% inferior. Si de la nada está muy "lejos" (valores bajos), 
-        #    hay un corte de la superficie o una caída.
-        
+        # Alta std en el ROI inferior = discontinuidad/escalón.
+        # Media baja en el 5% inferior = vacío/caída.
         std_dev = np.std(roi)
         roi_bottom_5_percent = depth_map_8bit[int(h * 0.95):h, :]
         mean_bottom = np.mean(roi_bottom_5_percent)
+
+        umbral_std        = 35.0   # Discontinuidad en el plano del suelo
+        umbral_profundidad = 80.0  # Pies apuntando al vacío
+
+        peligro_detectado = (std_dev > umbral_std and mean_bottom < umbral_profundidad)
+
+        # 5. Detección de Pared/Barrera (heurística MiDaS)
+        # Analizamos la banda central del frame (fila 25%–75%) dividida en 3 tercios.
+        # Si una zona tiene media alta (superficie cercana) Y std baja (superficie plana
+        # y uniforme), es casi con certeza una pared, puerta o barrera.
+        pared_zona = self._detectar_pared(depth_map_8bit, h, w)
+
+        return depth_map_8bit, peligro_detectado, pared_zona
+
+    # Helpers 
+
+    @staticmethod
+    def _detectar_pared(
+        depth_map_8bit: np.ndarray,
+        h: int,
+        w: int,
+    ) -> "str | None":
         
-        # Umbrales ajustables empíricamente (probablemente requieran tuneo)
-        umbral_std = 35.0         # Discontinuidad / corte en el plano del suelo
-        umbral_profundidad = 80.0 # Indica que los pies apuntan "al vacío" (valores alejados)
-        
-        peligro_detectado = False
-        if std_dev > umbral_std and mean_bottom < umbral_profundidad:
-            peligro_detectado = True
-            
-        return depth_map_8bit, peligro_detectado
+        # Banda central: filas 25% – 75%  (evita suelo y techo)
+        r0 = int(h * 0.25)
+        r1 = int(h * 0.75)
+        banda = depth_map_8bit[r0:r1, :]
+
+        # Dividir horizontalmente en tres tercios
+        t = w // 3
+        zonas = {
+            "izquierda": banda[:, :t],
+            "frente":    banda[:, t:2*t],
+            "derecha":   banda[:, 2*t:],
+        }
+
+        # Umbrales (ajustar si hay falsos positivos en cámara específica)
+        UMBRAL_MEDIA = 175.0   # Superficie muy cercana
+        UMBRAL_STD   = 30.0    # Superficie plana/uniforme (pared, no objeto rugoso)
+
+        candidatos = {}  # zona → media de profundidad
+        for nombre, roi in zonas.items():
+            if roi.size == 0:
+                continue
+            media = float(np.mean(roi))
+            std   = float(np.std(roi))
+            if media > UMBRAL_MEDIA and std < UMBRAL_STD:
+                candidatos[nombre] = media
+
+        if not candidatos:
+            return None
+
+        # Prioridad: frente > laterales; entre laterales, gana el más cercano
+        if "frente" in candidatos:
+            return "frente"
+        return max(candidatos, key=candidatos.__getitem__)
 
 def main():
     print("Iniciando Módulo MiDaS - Detector de Escalones y Precipicios...")

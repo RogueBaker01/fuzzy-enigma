@@ -272,6 +272,10 @@ def generar_audios_especiales():
         "giro_derecha.mp3":        "Giro brusco a la derecha detectado.",
         "frenada.mp3":             "Frenada súbita detectada.",
         "retroceso.mp3":           "Posible retroceso detectado.",
+        # Detección de pared/barrera (heurística MiDaS)
+        "pared_frente.mp3":        "¡Cuidado! Pared al frente.",
+        "pared_izquierda.mp3":     "¡Cuidado! Pared a tu izquierda.",
+        "pared_derecha.mp3":       "¡Cuidado! Pared a tu derecha.",
     }
 
     print(f"\n--- Generando {len(especiales)} audios especiales del sistema ---\n")
