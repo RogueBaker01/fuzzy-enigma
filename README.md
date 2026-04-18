@@ -240,23 +240,25 @@ La constante $K$ se calibra empíricamente: se coloca un objeto a exactamente 1.
 
 ### Detección de escaleras y desniveles
 
-Opera sobre el **ROI inferior** (30% más bajo del frame, filas $0.7h$ a $h$):
+Opera sobre el **ROI inferior** (30% más bajo del frame, filas 0.7h a h):
 
 1. **Desviación estándar del ROI:**
 
 $$
-\sigma_{\text{roi}} = \operatorname{std}(D[0.7h : h, :])
+\sigma_{\mathrm{roi}} = \mathrm{std}(D_{0.7h \to h})
 $$
 
-Si $\sigma_{\text{roi}} > 60.0$, se detecta una discontinuidad significativa en el suelo (escalón, rampa abrupta o precipicio).
+Si la desviación estándar supera 60.0, se detecta una discontinuidad significativa en el suelo (escalón, rampa abrupta o precipicio).
 
 2. **Caída relativa:**
 
+Se compara la media de profundidad de la parte alta del ROI (filas 0.7h a 0.8h) contra la parte baja (filas 0.95h a h):
+
 $$
-\text{caída} = \bar{p}_{\text{superior}} - \bar{p}_{\text{inferior}} > 20.0
+\bar{p}_{\mathrm{sup}} - \bar{p}_{\mathrm{inf}} > 20.0
 $$
 
-Donde $\bar{p}_{\text{superior}}$ es la media de profundidad en las filas $0.7h$ a $0.8h$, y $\bar{p}_{\text{inferior}}$ es la media en las filas $0.95h$ a $h$. Una caída relativa positiva indica que el suelo "se aleja" (desnivel o vacío).
+Una caída relativa positiva indica que el suelo "se aleja" (desnivel o vacío).
 
 Se emite alerta si **cualquiera** de las dos condiciones se cumple.
 
@@ -266,13 +268,13 @@ Evaluada **antes** que la detección de escaleras para poder suprimir falsos pos
 
 1. **Banda de análisis:** filas 25%–75% del frame (evita suelo y techo).
 2. **División en tercios horizontales** (izquierda, frente, derecha).
-3. Para cada tercio, se calcula $\bar{p}$ (media) y $\sigma$ (desviación estándar):
+3. Para cada tercio, se calcula la media y la desviación estándar de profundidad:
 
 $$
-\text{pared detectada} \iff \bar{p} > 145.0 \;\land\; \sigma < 25.0
+\mathrm{pared} \iff \bar{p} > 145.0 \;\land\; \sigma < 25.0
 $$
 
-Una **media alta** con **baja variación** indica una superficie plana y cercana (pared). El umbral de $\sigma < 25.0$ permite paredes con textura real (ladrillo, yeso rugoso).
+Una **media alta** con **baja variación** indica una superficie plana y cercana (pared). El umbral de std < 25.0 permite paredes con textura real (ladrillo, yeso rugoso).
 
 4. **Supresión de falso positivo:** Si se detecta pared `"frente"`, se suprime la alerta de escalón. Esto se debe a que la unión pared-suelo cae en la zona compartida (filas 70%–75%) y genera el mismo gradiente brusco que un escalón real.
 
@@ -281,10 +283,10 @@ Una **media alta** con **baja variación** indica una superficie plana y cercana
 Los mapas de profundidad se estabilizan entre frames con un filtro de media móvil exponencial:
 
 $$
-D_t = \alpha \cdot D_{\text{actual}} + (1 - \alpha) \cdot D_{t-1} \quad (\alpha = 0.6)
+D_t = \alpha \cdot D_{\mathrm{actual}} + (1 - \alpha) \cdot D_{t-1}
 $$
 
-Esto elimina el jitter causado por la renormalización min-max frame a frame, sin sacrificar capacidad de reacción.
+Con un valor de alfa = 0.6. Esto elimina el jitter causado por la renormalización min-max frame a frame, sin sacrificar capacidad de reacción.
 
 ---
 
