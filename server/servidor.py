@@ -18,7 +18,6 @@ export default function Index() {
         (async () => {
             await requestPermission();
             
-            // Reemplaza con la IP de la laptop RTX de tu compañero
             ws.current = new WebSocket('ws://10.242.180.213:8000/ws');
             
             ws.current.onopen = () => console.log("¡Conectado!");
