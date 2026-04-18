@@ -91,17 +91,7 @@ def resolver_fuente_video(args):
     if modo == "camara_ip":
         url = _url_camara_ip(args.ip)
         print(f"[FUENTE] Modo: Cámara IP  →  {url}")
-        print("[FUENTE] Verificando conexión...")
-        cap_test = cv2.VideoCapture(url)
-        if cap_test.isOpened():
-            cap_test.release()
-            print("[FUENTE] Cámara IP conectada.")
-            return url, f"CAMARA IP ({args.ip})"
-        else:
-            cap_test.release()
-            print(f"[FUENTE][WARN] No se pudo conectar a {url}")
-            print("[FUENTE][WARN] Usando webcam local como fallback.")
-            return 0, "WEBCAM (fallback)"
+        return url, f"CAMARA IP ({args.ip})"
 
     # Modo por defecto: archivo de video local
     print(f"[FUENTE] Modo: Archivo de video local")
