@@ -299,8 +299,6 @@ iris/
 ├── modelo_midas.py         # MidasDepthEstimator: profundidad, escaleras, paredes, EMA temporal
 ├── fusion_logica.py        # AudioWorker, GestorCooldown, monitores, math de distancia/posición
 ├── generador_audios.py     # Generador batch TTS con ElevenLabs (standalone, idempotente)
-├── server/
-│   └── servidor.py         # Servidor WebSocket alternativo (FastAPI, experimental)
 ├── audios/                 # 360+ MP3 pregrabados (generados por generador_audios.py)
 ├── .env                    # ELEVENLABS_API_KEY y ELEVENLABS_VOICE_ID (no versionado)
 └── .gitignore
@@ -320,7 +318,6 @@ iris/
 | Reproducción de audio | [pygame](https://www.pygame.org/) (mixer) |
 | Visión por computadora | [OpenCV](https://opencv.org/) |
 | Flujo óptico | Lucas-Kanade (OpenCV) |
-| Servidor alternativo | [FastAPI](https://fastapi.tiangolo.com/) |
 
 ### Hardware probado
 
