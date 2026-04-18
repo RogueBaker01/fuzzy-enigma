@@ -85,8 +85,8 @@ graph LR
 ### 1. Clonar el repositorio
 
 ```bash
-git clone https://github.com/tu-usuario/iris.git
-cd iris
+git clone https://github.com/tu-usuario/fuzzy-enigma.git
+cd fuzzy-enigma
 ```
 
 ### 2. Crear entorno virtual e instalar dependencias
