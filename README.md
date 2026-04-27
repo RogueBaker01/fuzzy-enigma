@@ -18,20 +18,6 @@ Convierte un iPhone montado en el pecho (POV) en un dispositivo de navegación p
 
 **Diseñado para espacios interiores**: oficinas, hoteles, aeropuertos, museos — entornos donde la red es controlada. Funciona completamente offline con la laptop como hotspot WiFi.
 
----
-
-## Demo
-
-<!-- Reemplaza este bloque con un GIF o enlace a video del sistema funcionando -->
-
-> **TODO:** Agregar GIF/video del sistema procesando un entorno real.
->
-> ```
-> ![Demo del sistema](docs/demo.gif)
-> ```
-
----
-
 ## Cómo Funciona
 
 ### Diagrama de Arquitectura
